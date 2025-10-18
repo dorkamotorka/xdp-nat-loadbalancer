@@ -150,9 +150,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// Check if it's either a:
 	// - client request: Flow doesn't exists
 	// - backend response: Flow exists
+	bpf_printk("dest IP key for flow in: %d", ip->daddr);
+	bpf_printk("src IP key for flow in: %d", ip->saddr);
 	struct four_tuple_t in;
-	in.src_ip = ip->daddr; // Load Balancer IP - 2.0.16.172
-	in.dst_ip = ip->saddr; // Client or Backend IP - 172.16.0.3
+	in.src_ip = ip->daddr; // Load Balancer IP
+	in.dst_ip = ip->saddr; // Client or Backend IP 
 	in.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
 	in.dst_port = bpf_ntohs(tcp->source); // Client or Backend source port
 	struct endpoint *out = bpf_map_lookup_elem(&flows, &in);
@@ -181,8 +183,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		
 		// Store flow (client -> backend)
 		struct four_tuple_t in_loadbalancer;
-		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP
-		in_loadbalancer.dst_ip = bpf_ntohl(backend->ip); // Backend IP
+		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP - 2.0.16.172
+		in_loadbalancer.dst_ip = bpf_htonl(backend->ip); // Backend IP - 3.0.16.172
 		in_loadbalancer.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
 		in_loadbalancer.dst_port = bpf_ntohs(tcp->dest); // Backend destination port - same as Load Balancer destination port because we don't change it
 		struct endpoint client;
