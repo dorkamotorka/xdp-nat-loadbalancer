@@ -152,6 +152,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// - backend response: Flow exists
 	bpf_printk("dest IP key for flow in: %d", ip->daddr);
 	bpf_printk("src IP key for flow in: %d", ip->saddr);
+	bpf_printk("src port key for flow in: %d", bpf_ntohs(tcp->dest));
+	bpf_printk("dest port key for flow in: %d", bpf_ntohs(tcp->source));
 	struct four_tuple_t in;
 	in.src_ip = ip->daddr; // Load Balancer IP
 	in.dst_ip = ip->saddr; // Client or Backend IP 
