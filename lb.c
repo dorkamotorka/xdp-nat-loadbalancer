@@ -137,12 +137,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
+	__u32 saddr_n = ip->saddr;  // already network order
+	__u32 daddr_n = ip->daddr;  // already network order
 	bpf_printk("Received Source MAC: %x:%x:%x:%x:%x:%x", 
 			eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
 	bpf_printk("Received Destination MAC: %x:%x:%x:%x:%x:%x", 
 			eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
-	bpf_printk("Received Source IP: %pI4", bpf_ntohl(ip->saddr));
-	bpf_printk("Received Destination IP: %pI4", bpf_ntohl(ip->daddr));
+	bpf_printk("Received Source IP: %pI4", &saddr_n);
+	bpf_printk("Received Destination IP: %pI4", &daddr_n);
 
 	// Lookup flow information (backend -> client)
 	// Check if it's either a:
@@ -213,6 +215,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// Update Ethernet source MAC address to the load-balancer MAC
 	__u32 key = 0;
 	struct endpoint *lb = bpf_map_lookup_elem(&load_balancer, &key);
+	if (!lb) {
+		return XDP_PASS;
+	}
 	ip->saddr = lb->ip;
 	__builtin_memcpy(eth->h_source, lb->mac, ETH_ALEN);
 
@@ -222,7 +227,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// Recalculate TCP checksum
 	tcp->check = recalc_tcp_checksum(tcp, ip, data_end);
 
-	bpf_printk("Redirecting packet to new IP %pI4 from IP %pI4", bpf_ntohl(ip->daddr), bpf_ntohl(ip->saddr));
+	__u32 saddr_new = bpf_ntohl(ip->saddr);  
+        __u32 daddr_new = bpf_ntohl(ip->daddr); 
+	bpf_printk("Redirecting packet to new IP %pI4 from IP %pI4", &daddr_new, &saddr_new);
 	bpf_printk("New Dest MAC: %x:%x:%x:%x:%x:%x", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
 	bpf_printk("New Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
 
