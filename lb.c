@@ -131,9 +131,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	}
 
 	// TODO: remove this afterwards
-	__u16 dst_port = bpf_ntohs(tcp->dest);
-	if (dst_port != 8000) {
-		// Not our target port
+	__u16 sport = bpf_ntohs(tcp->source);
+	__u16 dport = bpf_ntohs(tcp->dest);
+	if (!(sport == 8000 || dport == 8000)) {
 		return XDP_PASS;
 	}
 
@@ -205,7 +205,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                     out->mac[3], out->mac[4], out->mac[5]);
 		
 		// Redirect back to client source IP
-		ip->daddr = out->ip;
+		ip->daddr = bpf_ntohl(out->ip);
 		__builtin_memcpy(eth->h_dest, out->mac, ETH_ALEN);
 		bpf_map_delete_elem(&flows, &out); // Delete flow
     	}
@@ -218,7 +218,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	if (!lb) {
 		return XDP_PASS;
 	}
-	ip->saddr = lb->ip;
+	ip->saddr = bpf_ntohl(lb->ip);
 	__builtin_memcpy(eth->h_source, lb->mac, ETH_ALEN);
 
 	// Recalculate IP checksum
@@ -229,7 +229,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
 	__u32 saddr_new = bpf_ntohl(ip->saddr);  
         __u32 daddr_new = bpf_ntohl(ip->daddr); 
-	bpf_printk("Redirecting packet to new IP %pI4 from IP %pI4", &daddr_new, &saddr_new);
+	bpf_printk("Redirecting packet from IP %pI4 to IP %pI4", &saddr_new, &daddr_new);
 	bpf_printk("New Dest MAC: %x:%x:%x:%x:%x:%x", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
 	bpf_printk("New Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
 
