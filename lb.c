@@ -151,8 +151,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// - client request: Flow doesn't exists
 	// - backend response: Flow exists
 	struct four_tuple_t in;
-	in.src_ip = ip->daddr; // Load Balancer IP
-	in.dst_ip = ip->saddr; // Client or Backend IP
+	in.src_ip = ip->daddr; // Load Balancer IP - 2.0.16.172
+	in.dst_ip = ip->saddr; // Client or Backend IP - 172.16.0.3
 	in.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
 	in.dst_port = bpf_ntohs(tcp->source); // Client or Backend source port
 	struct endpoint *out = bpf_map_lookup_elem(&flows, &in);
@@ -182,7 +182,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		// Store flow (client -> backend)
 		struct four_tuple_t in_loadbalancer;
 		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP
-		in_loadbalancer.dst_ip = backend->ip; // Backend IP
+		in_loadbalancer.dst_ip = bpf_ntohl(backend->ip); // Backend IP
 		in_loadbalancer.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
 		in_loadbalancer.dst_port = bpf_ntohs(tcp->dest); // Backend destination port - same as Load Balancer destination port because we don't change it
 		struct endpoint client;
@@ -194,7 +194,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		}
 
 		// Replace destination IP with backends IP
-		ip->daddr = backend->ip;
+		ip->daddr = bpf_ntohl(backend->ip);
 		// Replace destination MAC with backends MAC address
 		__builtin_memcpy(eth->h_dest, backend->mac, ETH_ALEN);
 	} else {
@@ -205,7 +205,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                     out->mac[3], out->mac[4], out->mac[5]);
 		
 		// Redirect back to client source IP
-		ip->daddr = bpf_ntohl(out->ip);
+		ip->daddr = out->ip;
 		__builtin_memcpy(eth->h_dest, out->mac, ETH_ALEN);
 		bpf_map_delete_elem(&flows, &out); // Delete flow
     	}
