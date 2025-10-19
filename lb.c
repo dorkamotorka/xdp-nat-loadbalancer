@@ -7,6 +7,7 @@
 #define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 #define NUM_BACKENDS 1
 #define ETH_ALEN 6		/* Octets in one ethernet addr	 */
+#define AF_INET 2
 
 struct endpoint {
     __u32 ip;
@@ -37,8 +38,8 @@ struct {
 } backends SEC(".maps");
 
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1); // Single flow always
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 2); 
     __type(key, struct four_tuple_t);
     __type(value, struct endpoint);
 } flows SEC(".maps");
@@ -182,6 +183,27 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		    &ip_n,
 		    backend->mac[0], backend->mac[1], backend->mac[2],
 		    backend->mac[3], backend->mac[4], backend->mac[5]);
+
+		struct bpf_fib_lookup fib = {};
+		fib.family = AF_INET;
+		fib.ipv4_src = ip->daddr;
+		fib.ipv4_dst = bpf_htonl(backend->ip);
+		fib.l4_protocol = ip->protocol;
+		fib.tot_len = bpf_ntohs(ip->tot_len);
+		fib.ifindex = ctx->ingress_ifindex; /* start lookup from ingress */
+		int rc = bpf_fib_lookup(ctx, &fib, sizeof(fib), 0);
+
+		if (rc == BPF_FIB_LKUP_RET_SUCCESS) {
+			bpf_printk("FIB success: ifindex=%d\n", fib.ifindex);
+			bpf_printk("DMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+				fib.dmac[0], fib.dmac[1], fib.dmac[2],
+				fib.dmac[3], fib.dmac[4], fib.dmac[5]);
+			bpf_printk("SMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+				fib.smac[0], fib.smac[1], fib.smac[2],
+				fib.smac[3], fib.smac[4], fib.smac[5]);
+		} else {
+			bpf_printk("FIB lookup failed: rc=%d\n", rc);
+		}
 		
 		// Store flow (client -> backend)
 		struct four_tuple_t in_loadbalancer;
@@ -207,11 +229,30 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                     out->ip,
                     out->mac[0], out->mac[1], out->mac[2],
                     out->mac[3], out->mac[4], out->mac[5]);
+		struct bpf_fib_lookup fib = {};
+		fib.family = AF_INET;
+		fib.ipv4_src = ip->daddr;
+		fib.ipv4_dst = bpf_htonl(out->ip);
+		fib.l4_protocol = ip->protocol;
+		fib.tot_len = bpf_ntohs(ip->tot_len);
+		fib.ifindex = ctx->ingress_ifindex; /* start lookup from ingress */
+		int rc = bpf_fib_lookup(ctx, &fib, sizeof(fib), 0);
+
+		if (rc == BPF_FIB_LKUP_RET_SUCCESS) {
+			bpf_printk("FIB success: ifindex=%d\n", fib.ifindex);
+			bpf_printk("DMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+				fib.dmac[0], fib.dmac[1], fib.dmac[2],
+				fib.dmac[3], fib.dmac[4], fib.dmac[5]);
+			bpf_printk("SMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+				fib.smac[0], fib.smac[1], fib.smac[2],
+				fib.smac[3], fib.smac[4], fib.smac[5]);
+		} else {
+			bpf_printk("FIB lookup failed: rc=%d\n", rc);
+		}
 		
 		// Redirect back to client source IP
 		ip->daddr = out->ip;
 		__builtin_memcpy(eth->h_dest, out->mac, ETH_ALEN);
-		bpf_map_delete_elem(&flows, &out); // Delete flow
     	}
 
 	// Retrieve Load Balancer endpoint (IP + MAC)
