@@ -255,7 +255,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// Update IP source address to the load balancer IP
 	// Update Ethernet source MAC address to the load-balancer MAC
 	ip->saddr = lb_ip;
-	__builtin_memcpy(eth->h_source, fib.dmac, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, fib.smac, ETH_ALEN);
 
 	// Recalculate IP checksum
 	ip->check = recalc_ip_checksum(ip);
