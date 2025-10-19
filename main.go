@@ -72,7 +72,6 @@ func main() {
 
     	back_ep := lbEndpoint{
 		Ip:  back_ip,
-		Mac: [6]uint8{0},
     	}
 	if err := objs.lbMaps.Backends.Put(uint32(0), &back_ep); err != nil {
                 log.Fatalf("Error adding Load Balancers' endpoint to eBPF Map: %s", err)

@@ -4,14 +4,12 @@
 #include <bpf/bpf_helpers.h>
 #include "parse_helpers.h"
 
-#define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 #define NUM_BACKENDS 1
 #define ETH_ALEN 6		/* Octets in one ethernet addr	 */
 #define AF_INET 2
 
 struct endpoint {
     __u32 ip;
-    unsigned char mac[ETH_ALEN];
 };
 
 struct four_tuple_t {
@@ -216,7 +214,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		in_loadbalancer.dst_port = bpf_ntohs(tcp->source); // Backend destination port - same as Load Balancer destination port because we don't change it
 		struct endpoint client;
 		client.ip = ip->saddr; // Client IP
-		__builtin_memcpy(client.mac, eth->h_source, ETH_ALEN); // Client MAC address
 		int ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
 		if (ret != 0) {
 			bpf_printk("Failed to update conntrack eBPF map");
