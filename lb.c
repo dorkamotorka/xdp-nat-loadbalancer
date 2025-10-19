@@ -160,6 +160,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	in.dst_ip = ip->saddr; // Client or Backend IP 
 	in.src_port = bpf_ntohs(tcp->source); // Load Balancer destination port
 	in.dst_port = bpf_ntohs(tcp->dest); // Client or Backend source port
+	
+	struct bpf_fib_lookup fib = {};
+	__u32 lb_ip = ip->daddr;
 	struct endpoint *out = bpf_map_lookup_elem(&flows, &in);
 	if (!out) {
 		bpf_printk("Packet from client because no such flow exists yet");	
@@ -178,13 +181,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		    	return XDP_PASS;
 		}
 
-		__u32 ip_n = bpf_htonl(backend->ip);
-		bpf_printk("Backend IP: %pI4, MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-		    &ip_n,
-		    backend->mac[0], backend->mac[1], backend->mac[2],
-		    backend->mac[3], backend->mac[4], backend->mac[5]);
-
-		struct bpf_fib_lookup fib = {};
 		fib.family = AF_INET;
 		fib.ipv4_src = ip->daddr;
 		fib.ipv4_dst = bpf_htonl(backend->ip);
@@ -222,17 +218,16 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		// Replace destination IP with backends IP
 		ip->daddr = bpf_ntohl(backend->ip);
 		// Replace destination MAC with backends MAC address
-		__builtin_memcpy(eth->h_dest, backend->mac, ETH_ALEN);
+		__builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
 	} else {
 		bpf_printk("Packet from backend because the flow exists - redirecting back to client");
                 bpf_printk("Client IP: %pI4, MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
                     out->ip,
                     out->mac[0], out->mac[1], out->mac[2],
                     out->mac[3], out->mac[4], out->mac[5]);
-		struct bpf_fib_lookup fib = {};
 		fib.family = AF_INET;
 		fib.ipv4_src = ip->daddr;
-		fib.ipv4_dst = bpf_htonl(out->ip);
+		fib.ipv4_dst = out->ip;
 		fib.l4_protocol = ip->protocol;
 		fib.tot_len = bpf_ntohs(ip->tot_len);
 		fib.ifindex = ctx->ingress_ifindex; /* start lookup from ingress */
@@ -252,19 +247,13 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		
 		// Redirect back to client source IP
 		ip->daddr = out->ip;
-		__builtin_memcpy(eth->h_dest, out->mac, ETH_ALEN);
+		__builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
     	}
 
-	// Retrieve Load Balancer endpoint (IP + MAC)
 	// Update IP source address to the load balancer IP
 	// Update Ethernet source MAC address to the load-balancer MAC
-	__u32 key = 0;
-	struct endpoint *lb = bpf_map_lookup_elem(&load_balancer, &key);
-	if (!lb) {
-		return XDP_PASS;
-	}
-	ip->saddr = bpf_ntohl(lb->ip);
-	__builtin_memcpy(eth->h_source, lb->mac, ETH_ALEN);
+	ip->saddr = bpf_ntohl(lb_ip);
+	__builtin_memcpy(eth->h_source, fib.dmac, ETH_ALEN);
 
 	// Recalculate IP checksum
 	ip->check = recalc_ip_checksum(ip);
