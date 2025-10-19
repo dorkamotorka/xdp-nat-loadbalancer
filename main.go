@@ -3,39 +3,39 @@ package main
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf lb lb.c
 
 import (
+	"context"
+	"encoding/binary"
+	"flag"
+	"fmt"
 	"log"
 	"net"
-	"flag"
 	"os"
-	"context"
 	"os/signal"
-	"syscall"
-	"fmt"
 	"strings"
-	"encoding/binary"
+	"syscall"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 )
 
 var (
-    ifname   string
-    backends string
+	ifname   string
+	backends string
 )
 
 func parseIPv4(s string) (uint32, error) {
-    ip := net.ParseIP(s).To4()
-    if ip == nil {
-        return 0, fmt.Errorf("invalid IPv4: %s", s)
-    }
-    return binary.LittleEndian.Uint32(ip), nil
+	ip := net.ParseIP(s).To4()
+	if ip == nil {
+		return 0, fmt.Errorf("invalid IPv4: %s", s)
+	}
+	return binary.LittleEndian.Uint32(ip), nil
 }
 
 func main() {
 	flag.StringVar(&ifname, "i", "lo", "Network interface to attach eBPF programs")
 	flag.StringVar(&backends, "backends", "", "IP addressed of backends (separated by ',')")
 	flag.Parse()
- 
+
 	if backends == "" {
 		fmt.Fprintf(os.Stderr, "Error: missing required backend flags\n\n")
 		flag.Usage()
@@ -61,25 +61,25 @@ func main() {
 	// Example: backends = "10.0.0.2,10.0.0.3,10.0.0.4"
 	backendList := strings.Split(backends, ",")
 	if len(backendList) != 2 {
-	    log.Fatalf("For simplicity, this demo expects exactly 2 backend IPs, got %d: %v", len(backendList), backendList)
+		log.Fatalf("For simplicity, this demo expects exactly 2 backend IPs, got %d: %v", len(backendList), backendList)
 	}
 	for i, backend := range backendList {
-	    backend = strings.TrimSpace(backend)
-	    backIP, err := parseIPv4(backend)
-	    if err != nil {
-		log.Fatalf("Invalid backend IP %q: %v", backend, err)
-	    }
+		backend = strings.TrimSpace(backend)
+		backIP, err := parseIPv4(backend)
+		if err != nil {
+			log.Fatalf("Invalid backend IP %q: %v", backend, err)
+		}
 
-	    backEp := lbEndpoint{
-		Ip: backIP,
-	    }
+		backEp := lbEndpoint{
+			Ip: backIP,
+		}
 
-	    // Use index i as the map key to store multiple endpoints
-	    if err := objs.lbMaps.Backends.Put(uint32(i), &backEp); err != nil {
-		log.Fatalf("Error adding backend #%d (%s) to eBPF map: %v", i, backend, err)
-	    }
+		// Use index i as the map key to store multiple endpoints
+		if err := objs.lbMaps.Backends.Put(uint32(i), &backEp); err != nil {
+			log.Fatalf("Error adding backend #%d (%s) to eBPF map: %v", i, backend, err)
+		}
 
-	    log.Printf("Added backend #%d: %s", i, backend)
+		log.Printf("Added backend #%d: %s", i, backend)
 	}
 
 	iface, err := net.InterfaceByName(ifname)
@@ -89,9 +89,9 @@ func main() {
 
 	// Attach XDP program to the network interface.
 	xdplink, err := link.AttachXDP(link.XDPOptions{
-				Program:   objs.XdpLoadBalancer,
-				Interface: iface.Index,
-				Flags: link.XDPGenericMode,
+		Program:   objs.XdpLoadBalancer,
+		Interface: iface.Index,
+		Flags:     link.XDPGenericMode,
 	})
 	if err != nil {
 		log.Fatal("Attaching XDP:", err)
