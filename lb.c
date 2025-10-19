@@ -4,7 +4,7 @@
 #include <bpf/bpf_helpers.h>
 #include "parse_helpers.h"
 
-#define NUM_BACKENDS 1
+#define NUM_BACKENDS 2
 #define ETH_ALEN 6		/* Octets in one ethernet addr	 */
 #define AF_INET 2
 
@@ -208,8 +208,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		
 		// Store connection in the conntrack eBPF map (client -> backend)
 		struct four_tuple_t in_loadbalancer;
-		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP - 2.0.16.172
-		in_loadbalancer.dst_ip = backend->ip; // Backend IP - 3.0.16.172
+		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP
+		in_loadbalancer.dst_ip = backend->ip; // Backend IP
 		in_loadbalancer.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
 		in_loadbalancer.dst_port = bpf_ntohs(tcp->source); // Backend destination port - same as Load Balancer destination port because we don't change it
 		struct endpoint client;

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 	"fmt"
+	"strings"
 	"encoding/binary"
 
 	"github.com/cilium/ebpf/link"
@@ -18,9 +19,8 @@ import (
 )
 
 var (
-    ifname       string
-    backendOneIP string
-    //backendTwoIP string
+    ifname   string
+    backends string
 )
 
 func parseIPv4(s string) (uint32, error) {
@@ -33,12 +33,10 @@ func parseIPv4(s string) (uint32, error) {
 
 func main() {
 	flag.StringVar(&ifname, "i", "lo", "Network interface to attach eBPF programs")
-	flag.StringVar(&backendOneIP, "b-ip1", "", "IP address of backend #1")
-	//flag.StringVar(&backendTwoIP, "b-ip2", "", "IP address of backend #2")
+	flag.StringVar(&backends, "backends", "", "IP addressed of backends (separated by ',')")
 	flag.Parse()
  
-	// TODO: add second backend
-	if backendOneIP == "" {
+	if backends == "" {
 		fmt.Fprintf(os.Stderr, "Error: missing required backend flags\n\n")
 		flag.Usage()
 		os.Exit(1)
@@ -60,22 +58,34 @@ func main() {
 	}
 	defer objs.Close()
 
+	// Example: backends = "10.0.0.2,10.0.0.3,10.0.0.4"
+	backendList := strings.Split(backends, ",")
+	if len(backendList) != 2 {
+	    log.Fatalf("For simplicity, this demo expects exactly 2 backend IPs, got %d: %v", len(backendList), backendList)
+	}
+	for i, backend := range backendList {
+	    backend = strings.TrimSpace(backend)
+	    backIP, err := parseIPv4(backend)
+	    if err != nil {
+		log.Fatalf("Invalid backend IP %q: %v", backend, err)
+	    }
+
+	    backEp := lbEndpoint{
+		Ip: backIP,
+	    }
+
+	    // Use index i as the map key to store multiple endpoints
+	    if err := objs.lbMaps.Backends.Put(uint32(i), &backEp); err != nil {
+		log.Fatalf("Error adding backend #%d (%s) to eBPF map: %v", i, backend, err)
+	    }
+
+	    log.Printf("Added backend #%d: %s", i, backend)
+	}
+
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
 		log.Fatalf("Getting interface %s: %s", ifname, err)
 	}
-
-	back_ip, err := parseIPv4(backendOneIP)
-        if err != nil {
-                log.Fatal(err)
-        }
-
-    	back_ep := lbEndpoint{
-		Ip:  back_ip,
-    	}
-	if err := objs.lbMaps.Backends.Put(uint32(0), &back_ep); err != nil {
-                log.Fatalf("Error adding Load Balancers' endpoint to eBPF Map: %s", err)
-        }
 
 	// Attach XDP program to the network interface.
 	xdplink, err := link.AttachXDP(link.XDPOptions{
@@ -87,7 +97,7 @@ func main() {
 		log.Fatal("Attaching XDP:", err)
 	}
 	defer xdplink.Close()
-	log.Println("XDP program successfully attached. Press Enter to exit.")
+	log.Println("XDP Load Balancer successfully attached and running. Press Enter to exit.")
 
 	// Wait for SIGINT/SIGTERM (Ctrl+C) before exiting
 	<-ctx.Done()
