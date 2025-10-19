@@ -21,14 +21,6 @@ struct four_tuple_t {
     __u16 dst_port;
 };
 
-// Load Balancer IP and MAC address map
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1); // Single load balancer
-    __type(key, __u32);
-    __type(value, struct endpoint);
-} load_balancer SEC(".maps");
-
 // Backend IPs and MAC addresses map
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -42,7 +34,7 @@ struct {
     __uint(max_entries, 2); 
     __type(key, struct four_tuple_t);
     __type(value, struct endpoint);
-} flows SEC(".maps");
+} conntrack SEC(".maps");
 
 // FNV-1a hash for load balancing (no need for routing table)
 static __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
@@ -81,20 +73,21 @@ static __u16 __always_inline recalc_tcp_checksum(struct tcphdr *tcp, struct iphd
     return ~sum;
 }
 
-static __u16 __always_inline csum_fold_helper(__u64 csum) {
-    int i;
-    for (i = 0; i < 4; i++)
-    {
+static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip) {
+    // Clear checksum
+    ip->check = 0;
+
+    // Compute incremental checksum difference over the header
+    __u64 csum = bpf_csum_diff(0, 0, (unsigned int *)ip, sizeof(struct iphdr), 0);
+
+    // fold 64-bit csum to 16 bits (the “carry add” loop)
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
         if (csum >> 16)
             csum = (csum & 0xffff) + (csum >> 16);
     }
-    return ~csum;
-}
 
-static __u16 __always_inline recalc_ip_checksum(struct iphdr *ip) {
-    ip->check = 0;
-    unsigned long long csum = bpf_csum_diff(0, 0, (unsigned int *)ip, sizeof(struct iphdr), 0);
-    return csum_fold_helper(csum);
+    return ~csum;
 }
 
 SEC("xdp")
@@ -131,32 +124,32 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-	// TODO: remove this afterwards
-	__u16 sport = bpf_ntohs(tcp->source);
-	__u16 dport = bpf_ntohs(tcp->dest);
-	if (!(sport == 8000 || dport == 8000)) {
+	// We could technically load-balance all the traffic but
+	// we only focus on port 8000 to not impact any other network traffic
+	// in the playground
+	if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
 		return XDP_PASS;
 	}
 
-	__u32 saddr_n = ip->saddr;  // already network order
-	__u32 daddr_n = ip->daddr;  // already network order
-	bpf_printk("Received Source MAC: %x:%x:%x:%x:%x:%x", 
-			eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
-	bpf_printk("Received Destination MAC: %x:%x:%x:%x:%x:%x", 
-			eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
-	bpf_printk("Received Source IP: %pI4", &saddr_n);
-	bpf_printk("Received Destination IP: %pI4", &daddr_n);
+	// Print source and destination MAC addresses
+	bpf_printk("SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC %02x:%02x:%02x:%02x:%02x:%02x",
+	    eth->h_source[0], eth->h_source[1], eth->h_source[2],
+	    eth->h_source[3], eth->h_source[4], eth->h_source[5],
+	    eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
+	    eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
 
-	// Lookup flow information (backend -> client)
+	// Print source and destination IP addresses
+	bpf_printk("SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
+
+	// Store Load Balancer IP for later 
+	// It's always the destination IP because the XDP program
+	// is attached at the LB on ingress
+	__u32 lb_ip = ip->daddr;
+
+	// Lookup conntrack (connection tracking) information - actually eBPF map (backend -> client)
 	// Check if it's either a:
-	// - client request: Flow doesn't exists
-	// - backend response: Flow exists
-	/*
-	bpf_printk("dest IP key for flow in: %d", ip->daddr);
-	bpf_printk("src IP key for flow in: %d", ip->saddr);
-	bpf_printk("src port key for flow in: %d", bpf_ntohs(tcp->dest));
-	bpf_printk("dest port key for flow in: %d", bpf_ntohs(tcp->source));
-	*/
+	// - client request: Connection doesn't yet exists
+	// - backend response: Connection exists
 	struct four_tuple_t in;
 	in.src_ip = ip->daddr; // Load Balancer IP
 	in.dst_ip = ip->saddr; // Client or Backend IP 
@@ -164,14 +157,14 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	in.dst_port = bpf_ntohs(tcp->dest); // Client or Backend source port
 	
 	struct bpf_fib_lookup fib = {};
-	__u32 lb_ip = ip->daddr;
-	struct endpoint *out = bpf_map_lookup_elem(&flows, &in);
+	struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
 	if (!out) {
-		bpf_printk("Packet from client because no such flow exists yet");	
+		bpf_printk("Packet from client because no such connection exists yet");	
 
 		// Choose backend using consistent hashing (no routing table needed)
-		// Hash the 4-tuple for flow based backend decision
-		// Module with the number of backends which we hardcode for simplicity (2 backends)
+		// Hash the 4-tuple for persistent backend routing 
+		// (Could also be 5-tuple but we only showcase TCP traffic load balancing)
+		// Perform modulo with the number of backends which we hardcode for simplicity
 		struct four_tuple_t four_tuple;
 		four_tuple.src_ip = ip->saddr;
 		four_tuple.dst_ip = ip->daddr;
@@ -203,7 +196,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 			bpf_printk("FIB lookup failed: rc=%d\n", rc);
 		}
 		
-		// Store flow (client -> backend)
+		// Store connection in the conntrack eBPF map (client -> backend)
 		struct four_tuple_t in_loadbalancer;
 		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP - 2.0.16.172
 		in_loadbalancer.dst_ip = bpf_htonl(backend->ip); // Backend IP - 3.0.16.172
@@ -212,9 +205,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		struct endpoint client;
 		client.ip = ip->saddr; // Client IP
 		__builtin_memcpy(client.mac, eth->h_source, ETH_ALEN); // Client MAC address
-		int ret = bpf_map_update_elem(&flows, &in_loadbalancer, &client, BPF_ANY);
+		int ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
 		if (ret != 0) {
-			bpf_printk("Failed to update flows eBPF map");
+			bpf_printk("Failed to update conntrack eBPF map");
 		}
 
 		// Replace destination IP with backends IP
@@ -222,7 +215,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		// Replace destination MAC with backends MAC address
 		__builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
 	} else {
-		bpf_printk("Packet from backend because the flow exists - redirecting back to client");
+		bpf_printk("Packet from backend because the connection exists - redirecting back to client");
                 bpf_printk("Client IP: %pI4, MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
                     out->ip,
                     out->mac[0], out->mac[1], out->mac[2],
