@@ -1,8 +1,8 @@
 //go:build ignore
 #include "vmlinux.h"
-#include "parse_helpers.h"
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include "parse_helpers.h"
 
 #define NUM_BACKENDS 2
 #define ETH_ALEN 6 /* Octets in one ethernet addr	 */
