@@ -151,10 +151,12 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// Check if it's either a:
 	// - client request: Flow doesn't exists
 	// - backend response: Flow exists
+	/*
 	bpf_printk("dest IP key for flow in: %d", ip->daddr);
 	bpf_printk("src IP key for flow in: %d", ip->saddr);
 	bpf_printk("src port key for flow in: %d", bpf_ntohs(tcp->dest));
 	bpf_printk("dest port key for flow in: %d", bpf_ntohs(tcp->source));
+	*/
 	struct four_tuple_t in;
 	in.src_ip = ip->daddr; // Load Balancer IP
 	in.dst_ip = ip->saddr; // Client or Backend IP 
@@ -252,7 +254,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
 	// Update IP source address to the load balancer IP
 	// Update Ethernet source MAC address to the load-balancer MAC
-	ip->saddr = bpf_ntohl(lb_ip);
+	ip->saddr = lb_ip;
 	__builtin_memcpy(eth->h_source, fib.dmac, ETH_ALEN);
 
 	// Recalculate IP checksum
@@ -261,8 +263,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	// Recalculate TCP checksum
 	tcp->check = recalc_tcp_checksum(tcp, ip, data_end);
 
-	__u32 saddr_new = bpf_ntohl(ip->saddr);  
-        __u32 daddr_new = bpf_ntohl(ip->daddr); 
+	__u32 saddr_new = ip->saddr;  
+        __u32 daddr_new = ip->daddr; 
 	bpf_printk("Redirecting packet from IP %pI4 to IP %pI4", &saddr_new, &daddr_new);
 	bpf_printk("New Dest MAC: %x:%x:%x:%x:%x:%x", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
 	bpf_printk("New Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
