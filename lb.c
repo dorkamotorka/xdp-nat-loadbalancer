@@ -37,7 +37,7 @@ struct {
 } conntrack SEC(".maps");
 
 // FNV-1a hash for load balancing (no need for routing table)
-static __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
+static __always_inline __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
     __u32 hash = 2166136261U;
     hash = (hash ^ tuple->src_ip) * 16777619U;
     hash = (hash ^ tuple->dst_ip) * 16777619U;
@@ -79,33 +79,6 @@ static __always_inline void log_fib_error(int rc) {
         bpf_printk("FIB lookup failed: rc=%d (unknown). Check routing and ARP/NDP configuration.", rc);
         break;
     }
-}
-
-static __u16 __always_inline recalc_tcp_checksum(struct tcphdr *tcp, struct iphdr *ip, void *data_end) {
-    // Clear checksum
-    tcp->check = 0;
-
-    // Pseudo header checksum calculation
-    __u32 sum = 0;
-    sum += (__u16)(ip->saddr >> 16) + (__u16)(ip->saddr & 0xFFFF);
-    sum += (__u16)(ip->daddr >> 16) + (__u16)(ip->daddr & 0xFFFF);
-    sum += bpf_htons(IPPROTO_TCP);
-    sum += bpf_htons((__u16)(data_end - (void *)tcp));
-
-    // TCP header and payload checksum
-    #pragma clang loop unroll_count(MAX_TCP_CHECK_WORDS)
-    for (int i = 0; i <= MAX_TCP_CHECK_WORDS; i++) {
-        __u16 *ptr = (__u16 *)tcp + i;
-        if ((void *)ptr + 2 > data_end)
-            break;
-        sum += *(__u16 *)ptr;
-    }
-
-    // fold into 16 bit
-    while (sum >> 16)
-        sum = (sum & 0xFFFF) + (sum >> 16);
-
-    return ~sum;
 }
 
 static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip) {
@@ -184,19 +157,16 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-	// Print source and destination MAC addresses
+	// Print source and destination IP/MAC addresses
+	bpf_printk("SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
 	bpf_printk("SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC %02x:%02x:%02x:%02x:%02x:%02x",
 	    eth->h_source[0], eth->h_source[1], eth->h_source[2],
 	    eth->h_source[3], eth->h_source[4], eth->h_source[5],
 	    eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
 	    eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
 
-	// Print source and destination IP addresses
-	bpf_printk("SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-
 	// Store Load Balancer IP for later 
-	// It's always the destination IP because the XDP program
-	// is attached at the LB on ingress
+	// It's always the destination IP because the XDP program is attached at the LB on ingress
 	__u32 lb_ip = ip->daddr;
 
 	// Lookup conntrack (connection tracking) information - actually eBPF map (backend -> client)
@@ -250,18 +220,15 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		int ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
 		if (ret != 0) {
 			bpf_printk("Failed to update conntrack eBPF map");
+			return XDP_PASS;
 		}
 
-		// Replace destination IP with backends IP
+		// Replace destination IP with backends' IP
 		ip->daddr = backend->ip;
-		// Replace destination MAC with backends MAC address
+		// Replace destination MAC with backends' MAC
 		__builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
 	} else {
 		bpf_printk("Packet from backend because the connection exists - redirecting back to client");
-                bpf_printk("Client IP: %pI4, MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-                    out->ip,
-                    out->mac[0], out->mac[1], out->mac[2],
-                    out->mac[3], out->mac[4], out->mac[5]);
 
 		// Perform a FIB lookup - same as above
 		int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, out->ip, bpf_ntohs(ip->tot_len));
@@ -270,27 +237,30 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 			return XDP_PASS;
 		}
 		
-		// Redirect back to client source IP
+		// Replace destination IP and MAC with clients' IP and MAC
 		ip->daddr = out->ip;
 		__builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
     	}
 
-	// Update IP source address to the load balancer IP
-	// Update Ethernet source MAC address to the load-balancer MAC
+	// Replace source IP with load balancers' IP
 	ip->saddr = lb_ip;
+	// Replace source MAC with load balancers' MAC
 	__builtin_memcpy(eth->h_source, fib.smac, ETH_ALEN);
 
-	// Recalculate IP checksum
+	// We need to recalculate IP checksum because we modified the IP header
 	ip->check = recalc_ip_checksum(ip);
 
-	// Recalculate TCP checksum
-	tcp->check = recalc_tcp_checksum(tcp, ip, data_end);
+	// We don’t need to recalculate a Ethernet frame checksum after changing Ethernet MACs because 
+	// the Ethernet frame checksum (FCS) isn’t in the header but instead is 
+	// automatically recomputed by the NIC hardware when the packet is transmitted.
 
-	__u32 saddr_new = ip->saddr;  
-        __u32 daddr_new = ip->daddr; 
-	bpf_printk("Redirecting packet from IP %pI4 to IP %pI4", &saddr_new, &daddr_new);
-	bpf_printk("New Dest MAC: %x:%x:%x:%x:%x:%x", eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
-	bpf_printk("New Source MAC: %x:%x:%x:%x:%x:%x\n", eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5]);
+	bpf_printk("Redirecting packet %pI4 -> %pI4", &ip->saddr, &ip->daddr);
+	bpf_printk("SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC %02x:%02x:%02x:%02x:%02x:%02x",
+	    eth->h_source[0], eth->h_source[1], eth->h_source[2],
+	    eth->h_source[3], eth->h_source[4], eth->h_source[5],
+	    eth->h_dest[0],   eth->h_dest[1],   eth->h_dest[2],
+	    eth->h_dest[3],   eth->h_dest[4],   eth->h_dest[5]);
+
 
 	// Return XDP_TX to transmit the modified packet back to the network
 	return XDP_TX;
