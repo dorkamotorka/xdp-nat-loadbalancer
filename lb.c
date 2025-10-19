@@ -174,8 +174,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 	struct four_tuple_t in;
 	in.src_ip = ip->daddr; // Load Balancer IP
 	in.dst_ip = ip->saddr; // Client or Backend IP 
-	in.src_port = bpf_ntohs(tcp->source); // Load Balancer destination port
-	in.dst_port = bpf_ntohs(tcp->dest); // Client or Backend source port
+	in.src_port = tcp->source; // Load Balancer destination port
+	in.dst_port = tcp->dest; // Client or Backend source port
 	
 	struct bpf_fib_lookup fib = {};
 	struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
@@ -189,8 +189,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		struct four_tuple_t four_tuple;
 		four_tuple.src_ip = ip->saddr;
 		four_tuple.dst_ip = ip->daddr;
-		four_tuple.src_port = bpf_ntohs(tcp->source);
-		four_tuple.dst_port = bpf_ntohs(tcp->dest);
+		four_tuple.src_port = tcp->source;
+		four_tuple.dst_port = tcp->dest;
 		__u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
 		struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
 		if (!backend) {
@@ -210,8 +210,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		struct four_tuple_t in_loadbalancer;
 		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP
 		in_loadbalancer.dst_ip = backend->ip; // Backend IP
-		in_loadbalancer.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
-		in_loadbalancer.dst_port = bpf_ntohs(tcp->source); // Backend destination port - same as Load Balancer destination port because we don't change it
+		in_loadbalancer.src_port = tcp->dest; // Load Balancer destination port
+		in_loadbalancer.dst_port = tcp->source; // Backend destination port - same as Load Balancer destination port because we don't change it
 		struct endpoint client;
 		client.ip = ip->saddr; // Client IP
 		int ret = bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
