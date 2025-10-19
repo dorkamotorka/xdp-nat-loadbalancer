@@ -189,7 +189,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		struct four_tuple_t four_tuple;
 		four_tuple.src_ip = ip->saddr;
 		four_tuple.dst_ip = ip->daddr;
-		four_tuple.src_port = tcp->source;
+		four_tuple.src_port = tcp->source; // NOTE: The client source port can change, that's why different backend are queried on consequitive request from the same client!
 		four_tuple.dst_port = tcp->dest;
 		__u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
 		struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
