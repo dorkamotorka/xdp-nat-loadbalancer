@@ -28,8 +28,7 @@ func parseIPv4(s string) (uint32, error) {
     if ip == nil {
         return 0, fmt.Errorf("invalid IPv4: %s", s)
     }
-    // Convert to network byte order (big endian)
-    return binary.BigEndian.Uint32(ip), nil
+    return binary.LittleEndian.Uint32(ip), nil
 }
 
 func main() {

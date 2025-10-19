@@ -46,6 +46,41 @@ static __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
     return hash;
 }
 
+static __always_inline void log_fib_error(int rc) {
+    switch (rc) {
+    case BPF_FIB_LKUP_RET_BLACKHOLE:
+        bpf_printk("FIB lookup failed: BLACKHOLE route. Check 'ip route' – the destination may have a blackhole rule.");
+        break;
+    case BPF_FIB_LKUP_RET_UNREACHABLE:
+        bpf_printk("FIB lookup failed: UNREACHABLE route. Kernel routing table explicitly marks this destination unreachable.");
+        break;
+    case BPF_FIB_LKUP_RET_PROHIBIT:
+        bpf_printk("FIB lookup failed: PROHIBITED route. Forwarding is administratively blocked.");
+        break;
+    case BPF_FIB_LKUP_RET_NOT_FWDED:
+        bpf_printk("FIB lookup failed: NOT_FORWARDED. Destination likely on the same subnet – try BPF_FIB_LOOKUP_DIRECT for on-link lookup.");
+        break;
+    case BPF_FIB_LKUP_RET_FWD_DISABLED:
+        bpf_printk("FIB lookup failed: FORWARDING DISABLED. Enable it via 'sysctl -w net.ipv4.ip_forward=1' or IPv6 equivalent.");
+        break;
+    case BPF_FIB_LKUP_RET_UNSUPP_LWT:
+        bpf_printk("FIB lookup failed: UNSUPPORTED LWT. The route uses a lightweight tunnel not supported by bpf_fib_lookup().");
+        break;
+    case BPF_FIB_LKUP_RET_NO_NEIGH:
+        bpf_printk("FIB lookup failed: NO NEIGHBOR ENTRY. ARP/NDP unresolved – check 'ip neigh show' or ping the target to populate cache.");
+        break;
+    case BPF_FIB_LKUP_RET_FRAG_NEEDED:
+        bpf_printk("FIB lookup failed: FRAGMENTATION NEEDED. Packet exceeds MTU; adjust packet size or enable PMTU discovery.");
+        break;
+    case BPF_FIB_LKUP_RET_NO_SRC_ADDR:
+        bpf_printk("FIB lookup failed: NO SOURCE ADDRESS. Kernel couldn’t choose a source IP – ensure the interface has an IP in the correct subnet.");
+        break;
+    default:
+        bpf_printk("FIB lookup failed: rc=%d (unknown). Check routing and ARP/NDP configuration.", rc);
+        break;
+    }
+}
+
 static __u16 __always_inline recalc_tcp_checksum(struct tcphdr *tcp, struct iphdr *ip, void *data_end) {
     // Clear checksum
     tcp->check = 0;
@@ -88,6 +123,24 @@ static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip) {
     }
 
     return ~csum;
+}
+
+static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
+                                              struct bpf_fib_lookup *fib,
+                                              __u32 src_be,
+                                              __u32 dst_be,
+                                              __u16 tot_len) {
+    // Zero and populate only what a full lookup needs
+    __builtin_memset(fib, 0, sizeof(*fib));
+    // TODO: Comment these fields
+    fib->family      = AF_INET;
+    fib->ipv4_src    = src_be;         
+    fib->ipv4_dst    = dst_be;         
+    fib->l4_protocol = IPPROTO_TCP;
+    fib->tot_len     = tot_len;        
+    fib->ifindex     = ctx->ingress_ifindex;    
+
+    return bpf_fib_lookup(ctx, fib, sizeof(*fib), 0);
 }
 
 SEC("xdp")
@@ -176,30 +229,19 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		    	return XDP_PASS;
 		}
 
-		fib.family = AF_INET;
-		fib.ipv4_src = ip->daddr;
-		fib.ipv4_dst = bpf_htonl(backend->ip);
-		fib.l4_protocol = ip->protocol;
-		fib.tot_len = bpf_ntohs(ip->tot_len);
-		fib.ifindex = ctx->ingress_ifindex; /* start lookup from ingress */
-		int rc = bpf_fib_lookup(ctx, &fib, sizeof(fib), 0);
-
-		if (rc == BPF_FIB_LKUP_RET_SUCCESS) {
-			bpf_printk("FIB success: ifindex=%d\n", fib.ifindex);
-			bpf_printk("DMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-				fib.dmac[0], fib.dmac[1], fib.dmac[2],
-				fib.dmac[3], fib.dmac[4], fib.dmac[5]);
-			bpf_printk("SMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-				fib.smac[0], fib.smac[1], fib.smac[2],
-				fib.smac[3], fib.smac[4], fib.smac[5]);
-		} else {
-			bpf_printk("FIB lookup failed: rc=%d\n", rc);
+		// Perform a FIB lookup
+		// In other words: How do I reach this IP network?” → “Use this interface (and maybe this next hop)”.
+		// Depending on the flag you provide to bpf_fib_lookup(), it changes how the lookup behaves - check tutorial content for more info
+		int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip, bpf_ntohs(ip->tot_len));
+		if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
+			log_fib_error(rc);
+			return XDP_PASS;
 		}
 		
 		// Store connection in the conntrack eBPF map (client -> backend)
 		struct four_tuple_t in_loadbalancer;
 		in_loadbalancer.src_ip = ip->daddr; // Load Balancer IP - 2.0.16.172
-		in_loadbalancer.dst_ip = bpf_htonl(backend->ip); // Backend IP - 3.0.16.172
+		in_loadbalancer.dst_ip = backend->ip; // Backend IP - 3.0.16.172
 		in_loadbalancer.src_port = bpf_ntohs(tcp->dest); // Load Balancer destination port
 		in_loadbalancer.dst_port = bpf_ntohs(tcp->source); // Backend destination port - same as Load Balancer destination port because we don't change it
 		struct endpoint client;
@@ -211,7 +253,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 		}
 
 		// Replace destination IP with backends IP
-		ip->daddr = bpf_ntohl(backend->ip);
+		ip->daddr = backend->ip;
 		// Replace destination MAC with backends MAC address
 		__builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
 	} else {
@@ -220,24 +262,12 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                     out->ip,
                     out->mac[0], out->mac[1], out->mac[2],
                     out->mac[3], out->mac[4], out->mac[5]);
-		fib.family = AF_INET;
-		fib.ipv4_src = ip->daddr;
-		fib.ipv4_dst = out->ip;
-		fib.l4_protocol = ip->protocol;
-		fib.tot_len = bpf_ntohs(ip->tot_len);
-		fib.ifindex = ctx->ingress_ifindex; /* start lookup from ingress */
-		int rc = bpf_fib_lookup(ctx, &fib, sizeof(fib), 0);
 
-		if (rc == BPF_FIB_LKUP_RET_SUCCESS) {
-			bpf_printk("FIB success: ifindex=%d\n", fib.ifindex);
-			bpf_printk("DMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-				fib.dmac[0], fib.dmac[1], fib.dmac[2],
-				fib.dmac[3], fib.dmac[4], fib.dmac[5]);
-			bpf_printk("SMAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-				fib.smac[0], fib.smac[1], fib.smac[2],
-				fib.smac[3], fib.smac[4], fib.smac[5]);
-		} else {
-			bpf_printk("FIB lookup failed: rc=%d\n", rc);
+		// Perform a FIB lookup - same as above
+		int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, out->ip, bpf_ntohs(ip->tot_len));
+		if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
+			log_fib_error(rc);
+			return XDP_PASS;
 		}
 		
 		// Redirect back to client source IP
