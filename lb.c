@@ -169,13 +169,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   }
 
   // We could technically load-balance all the traffic but
-  // we only focus on port 8000 to not impact any other network traffic
-  // in the playground
+  // we only focus on port 8000 to not impact any other network traffic in the playground
   if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
     return XDP_PASS;
   }
 
-  // Print source and destination IP/MAC addresses
   bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
   bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
              "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -185,8 +183,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
              eth->h_dest[4], eth->h_dest[5]);
 
   // Store Load Balancer IP for later
-  // It's always the destination IP because the XDP program is attached at the
-  // LB on ingress
   __u32 lb_ip = ip->daddr;
 
   // Lookup conntrack (connection tracking) information - actually eBPF map
@@ -206,31 +202,22 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
     // Choose backend using consistent hashing (no routing table needed)
     // Hash the 5-tuple for persistent backend routing
-    // (Could also be 5-tuple but we only showcase TCP traffic load balancing)
-    // Perform modulo with the number of backends which we hardcode for
-    // simplicity
     struct four_tuple_t four_tuple;
     four_tuple.src_ip = ip->saddr;
     four_tuple.dst_ip = ip->daddr;
-    four_tuple.src_port =
-        tcp->source; // NOTE: The client source port can change, that's why
-                     // different backend might be queried on consequitive request
-                     // from the same client!
-		     // But the same TCP session is always redirected
-		     // to the same backend! 
+    four_tuple.src_port = tcp->source;
     four_tuple.dst_port = tcp->dest;
     four_tuple.protocol = IPPROTO_TCP;
+    // Perform modulo with the number of backends (NUM_BACKENDS=2 hardcoded for simplicity)
     __u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
+    // Lookup calculated key and retrieve the backend endpoint information
+    // NOTE: The 'backends' eBPF Map is populated from user space
     struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
     if (!backend) {
       return XDP_ABORTED;
     }
 
     // Perform a FIB lookup
-    // In other words: How do I reach this IP network?” → “Use this interface
-    // (and maybe this next hop)”. Depending on the flag you provide to
-    // bpf_fib_lookup(), it changes how the lookup behaves - check tutorial
-    // content for more info
     int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
