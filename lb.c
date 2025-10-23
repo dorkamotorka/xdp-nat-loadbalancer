@@ -193,9 +193,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Connection exist: backend reply
   // No Connection: client request
   struct four_tuple_t in;
-  in.src_ip = ip->daddr;     // Load Balancer IP
+  in.src_ip = ip->daddr;     // LB IP
   in.dst_ip = ip->saddr;     // Client or Backend IP
-  in.src_port = tcp->dest;   // Load balancer destination port - same as LB source port when redirected!
+  in.src_port = tcp->dest;   // LB destination port same as source port from which it redirected the request to backend
   in.dst_port = tcp->source; // Client or Backend source port
   in.protocol = IPPROTO_TCP; // TCP protocol
 
@@ -240,10 +240,10 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
     // Store connection in the conntrack eBPF map (client -> backend)
     struct four_tuple_t in_loadbalancer;
-    in_loadbalancer.src_ip = ip->daddr;   // Load Balancer IP
+    in_loadbalancer.src_ip = ip->daddr;   // LB IP
     in_loadbalancer.dst_ip = backend->ip; // Backend IP
     in_loadbalancer.src_port = tcp->source; // Client source port equal to the LB source port since we don't modify it!
-    in_loadbalancer.dst_port = tcp->dest; // Load Balancer destination port
+    in_loadbalancer.dst_port = tcp->dest; // LB destination port
     in_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol 
     struct endpoint client;
     client.ip = ip->saddr; // Client IP
