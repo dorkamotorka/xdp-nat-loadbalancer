@@ -218,7 +218,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     __u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
     struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
     if (!backend) {
-      return XDP_PASS;
+      return XDP_ABORTED;
     }
 
     // Perform a FIB lookup
@@ -230,7 +230,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
       log_fib_error(rc);
-      return XDP_PASS;
+      return XDP_ABORTED;
     }
 
     // Store connection in the conntrack eBPF map (client -> backend)
@@ -247,7 +247,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY);
     if (ret != 0) {
       bpf_printk("Failed to update conntrack eBPF map");
-      return XDP_PASS;
+      return XDP_ABORTED;
     }
 
     // Replace destination IP with backends' IP
@@ -263,7 +263,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
       log_fib_error(rc);
-      return XDP_PASS;
+      return XDP_ABORTED;
     }
 
     // Replace destination IP and MAC with clients' IP and MAC
