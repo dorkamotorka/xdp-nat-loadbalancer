@@ -243,7 +243,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     in_loadbalancer.src_ip = ip->daddr;   // Load Balancer IP
     in_loadbalancer.dst_ip = backend->ip; // Backend IP
     in_loadbalancer.src_port = tcp->dest; // Load Balancer destination port
-    in_loadbalancer.dst_port = tcp->source; // Client source port - same as Load Balancer source port!
+    in_loadbalancer.dst_port = tcp->source; // Client source port
     in_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol 
     struct endpoint client;
     client.ip = ip->saddr; // Client IP
