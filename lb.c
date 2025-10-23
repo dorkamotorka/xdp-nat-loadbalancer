@@ -190,9 +190,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   __u32 lb_ip = ip->daddr;
 
   // Lookup conntrack (connection tracking) information - actually eBPF map
-  // (backend -> client) Check if it's either a:
-  // - client request: Connection doesn't yet exists
-  // - backend response: Connection exists
+  // Connection exist: backend reply
+  // No Connection: client request
   struct four_tuple_t in;
   in.src_ip = ip->daddr;     // Load Balancer IP
   in.dst_ip = ip->saddr;     // Client or Backend IP
@@ -246,7 +245,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     in_loadbalancer.src_port = tcp->dest; // Load Balancer destination port
     in_loadbalancer.dst_port =
         tcp->source; // Backend destination port - same as Load Balancer
-                     // destination port because we don't change it
+                     // destination port because we don't change it (simplification)
     in_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol 
     struct endpoint client;
     client.ip = ip->saddr; // Client IP
