@@ -205,7 +205,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     bpf_printk("Packet from client because no such connection exists yet");
 
     // Choose backend using consistent hashing (no routing table needed)
-    // Hash the 4-tuple for persistent backend routing
+    // Hash the 5-tuple for persistent backend routing
     // (Could also be 5-tuple but we only showcase TCP traffic load balancing)
     // Perform modulo with the number of backends which we hardcode for
     // simplicity
