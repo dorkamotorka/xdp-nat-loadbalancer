@@ -131,7 +131,7 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
   // Interface for the lookup
   fib->ifindex = ctx->ingress_ifindex;
 
-  return bpf_fib_lookup(ctx, fib, sizeof(*fib), 0);
+  return bpf_fib_lookup(ctx, fib, sizeof(*fib), BPF_FIB_LOOKUP_DIRECT);
 }
 
 SEC("xdp")
