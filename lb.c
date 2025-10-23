@@ -35,7 +35,7 @@ struct {
   __type(value, struct endpoint);
 } conntrack SEC(".maps");
 
-// FNV-1a hash for load balancing (no need for routing table)
+// FNV-1a hash implementation for load balancing
 static __always_inline __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
   __u32 hash = 2166136261U;
   hash = (hash ^ tuple->src_ip) * 16777619U;
