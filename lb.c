@@ -17,6 +17,7 @@ struct four_tuple_t {
   __u32 dst_ip;
   __u16 src_port;
   __u16 dst_port;
+  __u8  protocol;
 };
 
 // Backend IPs and MAC addresses map
@@ -41,6 +42,7 @@ static __always_inline __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
   hash = (hash ^ tuple->dst_ip) * 16777619U;
   hash = (hash ^ tuple->src_port) * 16777619U;
   hash = (hash ^ tuple->dst_port) * 16777619U;
+  hash = (hash ^ tuple->protocol) * 16777619U;
   return hash;
 }
 
@@ -196,6 +198,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   in.dst_ip = ip->saddr;     // Client or Backend IP
   in.src_port = tcp->source; // Load Balancer destination port
   in.dst_port = tcp->dest;   // Client or Backend source port
+  in.protocol = IPPROTO_TCP; // TCP protocol
 
   struct bpf_fib_lookup fib = {};
   struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
@@ -212,9 +215,12 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     four_tuple.dst_ip = ip->daddr;
     four_tuple.src_port =
         tcp->source; // NOTE: The client source port can change, that's why
-                     // different backend are queried on consequitive request
+                     // different backend might be queried on consequitive request
                      // from the same client!
+		     // But the same TCP session is always redirected
+		     // to the same backend! 
     four_tuple.dst_port = tcp->dest;
+    four_tuple.protocol = IPPROTO_TCP;
     __u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
     struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
     if (!backend) {
@@ -241,6 +247,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     in_loadbalancer.dst_port =
         tcp->source; // Backend destination port - same as Load Balancer
                      // destination port because we don't change it
+    in_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol 
     struct endpoint client;
     client.ip = ip->saddr; // Client IP
     int ret =
