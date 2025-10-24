@@ -200,15 +200,15 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   if (!out) {
     bpf_printk("Packet from client because no such connection exists yet");
 
-    // Choose backend using consistent hashing (no routing table needed)
-    // Hash the 5-tuple for persistent backend routing
+    // Choose backend using consistent hashing
     struct four_tuple_t four_tuple;
     four_tuple.src_ip = ip->saddr;
     four_tuple.dst_ip = ip->daddr;
     four_tuple.src_port = tcp->source;
     four_tuple.dst_port = tcp->dest;
     four_tuple.protocol = IPPROTO_TCP;
-    // Perform modulo with the number of backends (NUM_BACKENDS=2 hardcoded for simplicity)
+    // Hash the 5-tuple for persistent backend routing and
+    // perform modulo with the number of backends (NUM_BACKENDS=2 hardcoded for simplicity)
     __u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
     // Lookup calculated key and retrieve the backend endpoint information
     // NOTE: The 'backends' eBPF Map is populated from user space
