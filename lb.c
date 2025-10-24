@@ -20,7 +20,9 @@ struct four_tuple_t {
   __u8  protocol;
 };
 
-// Backend IPs and MAC addresses map
+// Backend IPs
+// We could also include port information but we simplify
+// and assume that both LB and Backend listen on the same port for requests
 struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, NUM_BACKENDS);
