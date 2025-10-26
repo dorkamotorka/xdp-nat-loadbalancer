@@ -4,9 +4,9 @@
 #include <bpf/bpf_helpers.h>
 #include "parse_helpers.h"
 
-#define NUM_BACKENDS 2
-#define ETH_ALEN 6 /* Octets in one ethernet addr	 */
-#define AF_INET 2
+#define NUM_BACKENDS 2 // Hardcoded number of backends
+#define ETH_ALEN 6 // Octets in one ethernet addr
+#define AF_INET 2 // Instead of including the whole sys/socket.h header
 
 struct endpoint {
   __u32 ip;
@@ -188,7 +188,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   __u32 lb_ip = ip->daddr;
 
   // Lookup conntrack (connection tracking) information - actually eBPF map
-  // Connection exist: backend reply
+  // Connection exist: backend response
   // No Connection: client request
   struct four_tuple_t in;
   in.src_ip = ip->daddr;     // LB IP
