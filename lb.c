@@ -202,7 +202,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   if (!out) {
     bpf_printk("Packet from client because no such connection exists yet");
 
-    // Choose backend using consistent hashing
+    // Choose backend using simple hashing
     struct four_tuple_t four_tuple;
     four_tuple.src_ip = ip->saddr;
     four_tuple.dst_ip = ip->daddr;
