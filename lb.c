@@ -12,7 +12,7 @@ struct endpoint {
   __u32 ip;
 };
 
-struct four_tuple_t {
+struct five_tuple_t {
   __u32 src_ip;
   __u32 dst_ip;
   __u16 src_port;
@@ -33,12 +33,12 @@ struct {
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
-  __type(key, struct four_tuple_t);
+  __type(key, struct five_tuple_t);
   __type(value, struct endpoint);
 } conntrack SEC(".maps");
 
 // FNV-1a hash implementation for load balancing
-static __always_inline __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
+static __always_inline __u32 xdp_hash_tuple(struct five_tuple_t *tuple) {
   __u32 hash = 2166136261U;
   hash = (hash ^ tuple->src_ip) * 16777619U;
   hash = (hash ^ tuple->dst_ip) * 16777619U;
@@ -190,7 +190,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Lookup conntrack (connection tracking) information - actually eBPF map
   // Connection exist: backend response
   // No Connection: client request
-  struct four_tuple_t in;
+  struct five_tuple_t in = {};
   in.src_ip = ip->daddr;     // LB IP
   in.dst_ip = ip->saddr;     // Client or Backend IP
   in.src_port = tcp->dest;   // LB destination port same as source port from which it redirected the request to backend
@@ -203,15 +203,15 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     bpf_printk("Packet from client because no such connection exists yet");
 
     // Choose backend using simple hashing
-    struct four_tuple_t four_tuple;
-    four_tuple.src_ip = ip->saddr;
-    four_tuple.dst_ip = ip->daddr;
-    four_tuple.src_port = tcp->source;
-    four_tuple.dst_port = tcp->dest;
-    four_tuple.protocol = IPPROTO_TCP;
+    struct five_tuple_t five_tuple = {};
+    five_tuple.src_ip = ip->saddr;
+    five_tuple.dst_ip = ip->daddr;
+    five_tuple.src_port = tcp->source;
+    five_tuple.dst_port = tcp->dest;
+    five_tuple.protocol = IPPROTO_TCP;
     // Hash the 5-tuple for persistent backend routing and
     // perform modulo with the number of backends (NUM_BACKENDS=2 hardcoded for simplicity)
-    __u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
+    __u32 key = xdp_hash_tuple(&five_tuple) % NUM_BACKENDS;
     // Lookup calculated key and retrieve the backend endpoint information
     // NOTE: The 'backends' eBPF Map is populated from user space
     struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
@@ -228,7 +228,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     }
 
     // Store connection in the conntrack eBPF map (client -> backend)
-    struct four_tuple_t in_loadbalancer;
+    struct five_tuple_t in_loadbalancer = {};
     in_loadbalancer.src_ip = ip->daddr;   // LB IP
     in_loadbalancer.dst_ip = backend->ip; // Backend IP
     in_loadbalancer.src_port = tcp->source; // Client source port equal to the LB source port since we don't modify it!
