@@ -30,7 +30,7 @@ struct {
 
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 2);
+  __uint(max_entries, 1000);
   __type(key, struct four_tuple_t);
   __type(value, struct endpoint);
 } conntrack SEC(".maps");
