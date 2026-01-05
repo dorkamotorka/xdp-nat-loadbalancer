@@ -4,9 +4,9 @@
 #include <bpf/bpf_helpers.h>
 #include "parse_helpers.h"
 
-#define NUM_BACKENDS 2
-#define ETH_ALEN 6 /* Octets in one ethernet addr	 */
-#define AF_INET 2
+#define NUM_BACKENDS 2 // Hardcoded number of backends
+#define ETH_ALEN 6 // Octets in one ethernet addr
+#define AF_INET 2 // Instead of including the whole sys/socket.h header
 
 struct endpoint {
   __u32 ip;
@@ -20,7 +20,9 @@ struct four_tuple_t {
   __u8  protocol;
 };
 
-// Backend IPs and MAC addresses map
+// Backend IPs
+// We could also include port information but we simplify
+// and assume that both LB and Backend listen on the same port for requests
 struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, NUM_BACKENDS);
@@ -35,7 +37,7 @@ struct {
   __type(value, struct endpoint);
 } conntrack SEC(".maps");
 
-// FNV-1a hash for load balancing (no need for routing table)
+// FNV-1a hash implementation for load balancing
 static __always_inline __u32 xdp_hash_tuple(struct four_tuple_t *tuple) {
   __u32 hash = 2166136261U;
   hash = (hash ^ tuple->src_ip) * 16777619U;
@@ -169,13 +171,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   }
 
   // We could technically load-balance all the traffic but
-  // we only focus on port 8000 to not impact any other network traffic
-  // in the playground
+  // we only focus on port 8000 to not impact any other network traffic in the playground
   if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
     return XDP_PASS;
   }
 
-  // Print source and destination IP/MAC addresses
   bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
   bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
              "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -185,18 +185,16 @@ int xdp_load_balancer(struct xdp_md *ctx) {
              eth->h_dest[4], eth->h_dest[5]);
 
   // Store Load Balancer IP for later
-  // It's always the destination IP because the XDP program is attached at the
-  // LB on ingress
   __u32 lb_ip = ip->daddr;
 
   // Lookup conntrack (connection tracking) information - actually eBPF map
-  // Connection exist: backend reply
+  // Connection exist: backend response
   // No Connection: client request
   struct four_tuple_t in;
-  in.src_ip = ip->daddr;     // Load Balancer IP
+  in.src_ip = ip->daddr;     // LB IP
   in.dst_ip = ip->saddr;     // Client or Backend IP
-  in.src_port = tcp->source; // Client or Backend source port
-  in.dst_port = tcp->dest;   // Load balancer destination port
+  in.src_port = tcp->dest;   // LB destination port same as source port from which it redirected the request to backend
+  in.dst_port = tcp->source; // Client or Backend source port
   in.protocol = IPPROTO_TCP; // TCP protocol
 
   struct bpf_fib_lookup fib = {};
@@ -204,33 +202,24 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   if (!out) {
     bpf_printk("Packet from client because no such connection exists yet");
 
-    // Choose backend using consistent hashing (no routing table needed)
-    // Hash the 4-tuple for persistent backend routing
-    // (Could also be 5-tuple but we only showcase TCP traffic load balancing)
-    // Perform modulo with the number of backends which we hardcode for
-    // simplicity
+    // Choose backend using simple hashing
     struct four_tuple_t four_tuple;
     four_tuple.src_ip = ip->saddr;
     four_tuple.dst_ip = ip->daddr;
-    four_tuple.src_port =
-        tcp->source; // NOTE: The client source port can change, that's why
-                     // different backend might be queried on consequitive request
-                     // from the same client!
-		     // But the same TCP session is always redirected
-		     // to the same backend! 
+    four_tuple.src_port = tcp->source;
     four_tuple.dst_port = tcp->dest;
     four_tuple.protocol = IPPROTO_TCP;
+    // Hash the 5-tuple for persistent backend routing and
+    // perform modulo with the number of backends (NUM_BACKENDS=2 hardcoded for simplicity)
     __u32 key = xdp_hash_tuple(&four_tuple) % NUM_BACKENDS;
+    // Lookup calculated key and retrieve the backend endpoint information
+    // NOTE: The 'backends' eBPF Map is populated from user space
     struct endpoint *backend = bpf_map_lookup_elem(&backends, &key);
     if (!backend) {
       return XDP_ABORTED;
     }
 
     // Perform a FIB lookup
-    // In other words: How do I reach this IP network?” → “Use this interface
-    // (and maybe this next hop)”. Depending on the flag you provide to
-    // bpf_fib_lookup(), it changes how the lookup behaves - check tutorial
-    // content for more info
     int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip,
                                 bpf_ntohs(ip->tot_len));
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
@@ -240,10 +229,10 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
     // Store connection in the conntrack eBPF map (client -> backend)
     struct four_tuple_t in_loadbalancer;
-    in_loadbalancer.src_ip = ip->daddr;   // Load Balancer IP
+    in_loadbalancer.src_ip = ip->daddr;   // LB IP
     in_loadbalancer.dst_ip = backend->ip; // Backend IP
-    in_loadbalancer.src_port = tcp->dest; // Load Balancer destination port
-    in_loadbalancer.dst_port = tcp->source; // Client source port
+    in_loadbalancer.src_port = tcp->source; // Client source port equal to the LB source port since we don't modify it!
+    in_loadbalancer.dst_port = tcp->dest; // LB destination port
     in_loadbalancer.protocol = IPPROTO_TCP; // TCP protocol 
     struct endpoint client;
     client.ip = ip->saddr; // Client IP
