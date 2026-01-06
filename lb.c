@@ -213,7 +213,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
   // We could technically load-balance all the traffic but
   // we only focus on port 8000 to not impact any other network traffic in the playground
-  if (bpf_ntohs(tcp->source) != 5201 && bpf_ntohs(tcp->dest) != 5201) {
+  if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
     return XDP_PASS;
   }
 
