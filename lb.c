@@ -7,6 +7,8 @@
 #define NUM_BACKENDS 2 // Hardcoded number of backends
 #define ETH_ALEN 6 // Octets in one ethernet addr
 #define AF_INET 2 // Instead of including the whole sys/socket.h header
+#define IPROTO_TCP 6 // TCP
+#define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
 struct endpoint {
   __u32 ip;
@@ -112,6 +114,45 @@ static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip) {
   return ~csum;
 }
 
+static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iphdr *iph, void *data_end) {
+    tcph->check = 0;
+    __u32 sum = 0;
+
+    // Pseudo-header: IP addresses
+    sum += (__u16)(iph->saddr >> 16) + (__u16)(iph->saddr & 0xFFFF);
+    sum += (__u16)(iph->daddr >> 16) + (__u16)(iph->daddr & 0xFFFF);
+    sum += bpf_htons(IPPROTO_TCP);
+
+    // Pseudo-header: TCP Length (Total IP len - IP header len)
+    // IMPORTANT: Use the IP header, not data_end
+    __u16 tcp_len = bpf_ntohs(iph->tot_len) - (iph->ihl * 4);
+    sum += bpf_htons(tcp_len);
+
+    // TCP Header + Payload
+    // Use a safe bound check against data_end for the pointer,
+    // but the loop limit should be based on the actual packet size
+    __u16 *ptr = (__u16 *)tcph;
+    #pragma unroll
+    for (int i = 0; i < MAX_TCP_CHECK_WORDS; i++) {
+        if ((void *)(ptr + 1) > data_end || (void *)ptr >= (void *)tcph + tcp_len)
+            break;
+        sum += *ptr;
+        ptr++;
+    }
+
+    // Handle odd-length packets (the last byte)
+    if (tcp_len & 1) {
+        if ((void *)ptr + 1 <= data_end) {
+            sum += bpf_htons(*(__u8 *)ptr << 8);
+        }
+    }
+
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+
+    return ~sum;
+}
+
 static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
                                               struct bpf_fib_lookup *fib,
                                               __u32 src, __u32 dst,
@@ -172,7 +213,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
   // We could technically load-balance all the traffic but
   // we only focus on port 8000 to not impact any other network traffic in the playground
-  if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
+  if (bpf_ntohs(tcp->source) != 5201 && bpf_ntohs(tcp->dest) != 5201) {
     return XDP_PASS;
   }
 
@@ -271,6 +312,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
   // We need to recalculate IP checksum because we modified the IP header
   ip->check = recalc_ip_checksum(ip);
+
+  // As well as TCP Checksum
+  tcp->check = recalc_tcp_checksum(tcp, ip, data_end);
 
   // We don’t need to recalculate a Ethernet frame checksum after changing
   // Ethernet MACs because the Ethernet frame checksum (FCS) isn’t in the header
