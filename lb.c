@@ -194,7 +194,10 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
   return bpf_fib_lookup(ctx, fib, sizeof(*fib), 0);
 }
 
-static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, struct connection *conn, struct tcphdr *tcp, int direction) {
+static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
+                                                  struct connection *conn, 
+                                                  struct tcphdr *tcp, 
+                                                  int direction) {
   // client to backend direction
   if (direction == 0) {
     if (conn->state.state == 0 && tcp->syn == 0) {
@@ -324,7 +327,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   struct bpf_fib_lookup fib = {};
   struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
   if (!out) {
-    bpf_printk("Packet from client because no such connntrack entry exists yet");
+    bpf_printk("Packet from client because no such conntrack entry exists yet");
 
     // Check for existing connections
     struct five_tuple_t five_tuple = {};
