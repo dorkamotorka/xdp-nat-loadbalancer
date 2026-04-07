@@ -16,7 +16,7 @@ struct endpoint {
 
 struct backend {
   struct endpoint endpoint;
-  __u32 connections;
+  __u32 num_connections;
 };
 
 struct five_tuple_t {
@@ -24,16 +24,15 @@ struct five_tuple_t {
   __u32 dst_ip;
   __u16 src_port;
   __u16 dst_port;
-  __u8 protocol;
+  __u8  protocol;
 };
 
 // TCP connection state:
 // 0: syn seen, handshake not complete
 // 1: ack without syn seen, handshake complete
-// 2: fin seen from client
-// 3: fin seen from backend
+// 2: fin from client seen
+// 3: fin from backend seen
 // 4: fin seen from both sides, waiting for final ack
-
 struct tcp_state {
   __u8 state;
 };
@@ -65,7 +64,7 @@ struct {
   __uint(max_entries, 1000);
   __type(key, struct five_tuple_t);
   __type(value, struct connection);
-} client_to_backend SEC(".maps");
+} connections SEC(".maps");
 
 static __always_inline void log_fib_error(int rc) {
   switch (rc) {
@@ -200,8 +199,8 @@ static __always_inline void update_TCP_state(struct five_tuple_t five_tuple, str
     if (conn->state.state == 0 && tcp->syn == 0) {
       struct connection updated = *conn;
       updated.state.state = 1;
-      bpf_map_update_elem(&client_to_backend, &five_tuple, &updated, BPF_ANY);
-      conn = bpf_map_lookup_elem(&client_to_backend, &five_tuple);
+      bpf_map_update_elem(&connections, &five_tuple, &updated, BPF_ANY);
+      conn = bpf_map_lookup_elem(&connections, &five_tuple);
       if (!conn)
         return;
     }
@@ -212,8 +211,8 @@ static __always_inline void update_TCP_state(struct five_tuple_t five_tuple, str
       } else {
         updated.state.state = 2;
       }
-      bpf_map_update_elem(&client_to_backend, &five_tuple, &updated, BPF_ANY);
-      conn = bpf_map_lookup_elem(&client_to_backend, &five_tuple);
+      bpf_map_update_elem(&connections, &five_tuple, &updated, BPF_ANY);
+      conn = bpf_map_lookup_elem(&connections, &five_tuple);
       if (!conn) {
         return;
       }
@@ -224,11 +223,11 @@ static __always_inline void update_TCP_state(struct five_tuple_t five_tuple, str
         return;
       }
       struct backend nb = *b;
-      if (nb.connections > 0) {
-        nb.connections -= 1;
+      if (nb.num_connections > 0) {
+        nb.num_connections -= 1;
       }
       bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
-      bpf_map_delete_elem(&client_to_backend, &five_tuple);
+      bpf_map_delete_elem(&connections, &five_tuple);
     }
   } else {
     if (tcp->fin) {
@@ -238,8 +237,8 @@ static __always_inline void update_TCP_state(struct five_tuple_t five_tuple, str
       } else {
         updated.state.state = 3;
       }
-      bpf_map_update_elem(&client_to_backend, &five_tuple, &updated, BPF_ANY);
-      conn = bpf_map_lookup_elem(&client_to_backend, &five_tuple);
+      bpf_map_update_elem(&connections, &five_tuple, &updated, BPF_ANY);
+      conn = bpf_map_lookup_elem(&connections, &five_tuple);
       if (!conn) {
         return;
       }
@@ -250,11 +249,11 @@ static __always_inline void update_TCP_state(struct five_tuple_t five_tuple, str
         return;
       }
       struct backend nb = *b;
-      if (nb.connections > 0) {
-        nb.connections -= 1;
+      if (nb.num_connections > 0) {
+        nb.num_connections -= 1;
       }
       bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
-      bpf_map_delete_elem(&client_to_backend, &five_tuple);
+      bpf_map_delete_elem(&connections, &five_tuple);
     }
   }
 }
@@ -335,9 +334,9 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     five_tuple.dst_port = tcp->dest;
     five_tuple.protocol = IPPROTO_TCP;
 
-    struct connection *conn = bpf_map_lookup_elem(&client_to_backend, &five_tuple);
+    struct connection *conn = bpf_map_lookup_elem(&connections, &five_tuple);
     if (conn) {
-      bpf_printk("Existing connection found in client_to_backend map");
+      bpf_printk("Existing connection found in connections map");
       update_TCP_state(five_tuple, conn, tcp, 0);
       backend = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!backend) {
@@ -347,7 +346,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       if (tcp->syn == 0) {
         return XDP_ABORTED;
       }
-      bpf_printk("No existing connection found in client_to_backend map, new connection");
+      bpf_printk("No existing connection found in connections map, new connection");
 
       // Select a backend using least connections algorithm
       __u32 key = 0;
@@ -356,8 +355,8 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         __u32 idx = i;
         struct backend *candidate_backend = bpf_map_lookup_elem(&backends, &idx);
         if (candidate_backend) {
-          if (candidate_backend->connections < min_connections) {
-            min_connections = candidate_backend->connections;
+          if (candidate_backend->num_connections < min_connections) {
+            min_connections = candidate_backend->num_connections;
             key = idx;
           }
         }
@@ -368,11 +367,11 @@ int xdp_load_balancer(struct xdp_md *ctx) {
         return XDP_ABORTED;
       }
 
-      // Store the selected backend for this connection in the client_to_backend map
+      // Store the selected backend for this connection in the connections map
       struct connection new_conn = {};
       new_conn.backend_index = key;
       new_conn.state.state = 0;
-      int ret = bpf_map_update_elem(&client_to_backend, &five_tuple, &new_conn, BPF_ANY);
+      int ret = bpf_map_update_elem(&connections, &five_tuple, &new_conn, BPF_ANY);
       if (ret != 0) {
         return XDP_ABORTED;
       }
@@ -393,7 +392,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
 
       // Increment the connection count for the selected backend
       struct backend updated_backend = *backend;
-      updated_backend.connections += 1;
+      updated_backend.num_connections += 1;
       ret = bpf_map_update_elem(&backends, &key, &updated_backend, BPF_ANY);
       if (ret != 0) {
         return XDP_ABORTED;
@@ -415,7 +414,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     bpf_printk("Packet from backend because the connection exists - "
                "redirecting back to client");
 
-    // make the key to lookup the connection in the client_to_backend map
+    // make the key to lookup the connection in the connections map
     struct five_tuple_t five_tuple = {};
     five_tuple.src_ip = out->ip;       // Client IP
     five_tuple.dst_ip = ip->daddr;     // LB IP
@@ -423,7 +422,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     five_tuple.dst_port = tcp->source; // Client destination port
     five_tuple.protocol = IPPROTO_TCP; // TCP protocol
 
-    struct connection *conn = bpf_map_lookup_elem(&client_to_backend, &five_tuple);
+    struct connection *conn = bpf_map_lookup_elem(&connections, &five_tuple);
     if (!conn) {
       return XDP_ABORTED;
     }
