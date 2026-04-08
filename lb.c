@@ -27,19 +27,17 @@ struct five_tuple_t {
   __u8  protocol;
 };
 
-// TCP connection state:
-// 0: syn seen, handshake not complete
-// 1: ack without syn seen, handshake complete
-// 2: fin from client seen
-// 3: fin from backend seen
-// 4: fin seen from both sides, waiting for final ack
-struct tcp_state {
-  __u8 state;
-};
-
 struct connection {
+  // Index of the backend in the backends map for this connection
   __u32 backend_index;
-  struct tcp_state state;
+
+  // TCP connection state:
+  // 0: syn seen, handshake not complete
+  // 1: ack without syn seen, handshake complete
+  // 2: fin from client seen
+  // 3: fin from backend seen
+  // 4: fin seen from both sides, waiting for final ack
+  __u8  state;
 };
 
 // Backend IPs
@@ -200,9 +198,9 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
                                                   int direction) {
   // client to backend direction
   if (direction == 0) {
-    if (conn->state.state == 0 && tcp->syn == 0) {
+    if (conn->state == 0 && tcp->syn == 0) {
       struct connection updated = *conn;
-      updated.state.state = 1;
+      updated.state = 1;
       bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
       conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
       if (!conn)
@@ -210,10 +208,10 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     }
     if (tcp->fin) {
       struct connection updated = *conn;
-      if (conn->state.state == 3) {
-        updated.state.state = 4;
+      if (conn->state == 3) {
+        updated.state = 4;
       } else {
-        updated.state.state = 2;
+        updated.state = 2;
       }
       bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
       conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
@@ -221,7 +219,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
         return;
       }
     }
-    if ((tcp->ack && conn->state.state == 4 && tcp->fin == 0) || tcp->rst) {
+    if ((tcp->ack && conn->state == 4 && tcp->fin == 0) || tcp->rst) {
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!b) {
         return;
@@ -237,10 +235,10 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
   } else {
     if (tcp->fin) {
       struct connection updated = *conn;
-      if (conn->state.state == 2) {
-        updated.state.state = 4;
+      if (conn->state == 2) {
+        updated.state = 4;
       } else {
-        updated.state.state = 3;
+        updated.state = 3;
       }
       bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
       conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
@@ -248,7 +246,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
         return;
       }
     }
-    if ((tcp->ack && conn->state.state == 4 && tcp->fin == 0) || tcp->rst) {
+    if ((tcp->ack && conn->state == 4 && tcp->fin == 0) || tcp->rst) {
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!b) {
         return;
@@ -327,7 +325,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   struct bpf_fib_lookup fib = {};
   struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
   if (!out) {
-    bpf_printk("Packet from client because no such conntrack entry exists yet");
+    bpf_printk("Packet from client..");
 
     // Check for existing connections
     struct five_tuple_t five_tuple = {};
@@ -376,7 +374,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       // Store the selected backend for this connection in the statetrack map
       struct connection new_conn = {};
       new_conn.backend_index = key;
-      new_conn.state.state = 0;
+      new_conn.state = 0;
       int ret = bpf_map_update_elem(&statetrack, &five_tuple, &new_conn, BPF_ANY);
       if (ret != 0) {
         return XDP_ABORTED;
@@ -417,8 +415,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     // Replace destination MAC with backends' MAC
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
   } else {
-    bpf_printk("Packet from backend because the connection exists on the conntrack map - "
-               "redirecting back to client");
+    bpf_printk("Packet from backend..");
 
     // make the key to lookup the connection in the statetrack map
     struct five_tuple_t out_loadbalancer = {};
