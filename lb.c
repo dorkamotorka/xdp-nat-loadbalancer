@@ -196,72 +196,80 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
   return bpf_fib_lookup(ctx, fib, sizeof(*fib), 0);
 }
 
+// Update connection state in map and reload pointer
+static __always_inline struct connection* update_conn_state(struct five_tuple_t *five_tuple,
+                                                            struct connection *conn,
+                                                            __u8 new_state) {
+  struct connection updated = *conn;
+  updated.state = new_state;
+
+  bpf_map_update_elem(&statetrack, five_tuple, &updated, BPF_ANY);
+  return bpf_map_lookup_elem(&statetrack, five_tuple);
+}
+
+// Decrement backend connection count + delete connection
+static __always_inline void cleanup_connection(struct five_tuple_t *five_tuple,
+                                               struct connection *conn) {
+  struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
+  if (!b)
+    return;
+
+  struct backend nb = *b;
+  if (nb.num_connections > 0)
+    nb.num_connections--;
+
+  bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
+  bpf_map_delete_elem(&statetrack, five_tuple);
+}
+
 static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple, 
                                                   struct connection *conn, 
                                                   struct tcphdr *tcp, 
                                                   int direction) {
   // client to backend direction
-  if (direction == 0) {
-    if (conn->state == TCP_STATE_SYN_SEEN && tcp->syn == 0) {
-      struct connection updated = *conn;
-      updated.state = TCP_STATE_ESTABLISHED;
-      bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
-      conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
-      if (!conn)
-        return;
+  if (direction == 0 &&
+      conn->state == TCP_STATE_SYN_SEEN &&
+      tcp->syn == 0) {
+    conn = update_conn_state(&five_tuple, conn, TCP_STATE_ESTABLISHED);
+    if (!conn) {
+      return;
     }
-    if (tcp->fin) {
-      struct connection updated = *conn;
-      if (conn->state == TCP_STATE_FIN_FROM_BACKEND) {
-        updated.state = TCP_STATE_FIN_BOTH;
-      } else {
-        updated.state = TCP_STATE_FIN_FROM_CLIENT;
-      }
-      bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
-      conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
-      if (!conn) {
-        return;
-      }
+    bpf_printk("TCP Handshake complete, connection established..")
+  }
+
+  if (tcp->fin) {
+    __u8 new_state;
+
+    if (direction == 0) {
+      new_state = (conn->state == TCP_STATE_FIN_FROM_CLIENT)
+                    ? TCP_STATE_FIN_BOTH
+                    : TCP_STATE_FIN_FROM_BACKEND;
+      bpf_printk("FIN seen from client...");
+    } else {
+      new_state = (conn->state == TCP_STATE_FIN_FROM_BACKEND)
+                    ? TCP_STATE_FIN_BOTH
+                    : TCP_STATE_FIN_FROM_CLIENT;
+      bpf_printk("FIN seen from backend...");
     }
-    if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
-      struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-      if (!b) {
-        return;
-      }
-      struct backend nb = *b;
-      if (nb.num_connections > 0) {
-        nb.num_connections -= 1;
-      }
-      bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
-      bpf_map_delete_elem(&statetrack, &five_tuple);
+
+    conn = update_conn_state(&five_tuple, conn, new_state);
+    if (!conn) {
+      return;
     }
-  // backend to client direction
-  } else {
-    if (tcp->fin) {
-      struct connection updated = *conn;
-      if (conn->state == TCP_STATE_FIN_FROM_CLIENT) {
-        updated.state = TCP_STATE_FIN_BOTH;
-      } else {
-        updated.state = TCP_STATE_FIN_FROM_BACKEND;
-      }
-      bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
-      conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
-      if (!conn) {
-        return;
-      }
+  }
+
+  if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
+    struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
+    if (!b) {
+      return;
     }
-    if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
-      struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
-      if (!b) {
-        return;
-      }
-      struct backend nb = *b;
-      if (nb.num_connections > 0) {
-        nb.num_connections -= 1;
-      }
-      bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
-      bpf_map_delete_elem(&statetrack, &five_tuple);
+    struct backend nb = *b;
+    if (nb.num_connections > 0) {
+      nb.num_connections -= 1;
     }
+    bpf_map_update_elem(&backends, &conn->backend_index, &nb, BPF_ANY);
+    bpf_map_delete_elem(&statetrack, &five_tuple);
+    bpf_printk("Connection closed, cleaning up..");
   }
 }
 
