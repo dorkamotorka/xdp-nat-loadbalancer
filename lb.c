@@ -10,15 +10,6 @@
 #define IPROTO_TCP 6            // TCP
 #define MAX_TCP_CHECK_WORDS 750 // max 1500 bytes to check in TCP checksum. This is MTU dependent
 
-struct endpoint {
-  __u32 ip;
-};
-
-struct backend {
-  struct endpoint endpoint;
-  __u32 num_connections;
-};
-
 struct five_tuple_t {
   __u32 src_ip;
   __u32 dst_ip;
@@ -27,16 +18,29 @@ struct five_tuple_t {
   __u8  protocol;
 };
 
+struct endpoint {
+  __u32 ip;
+};
+
+struct backend {
+  // Backend endpoint information (currently only IP, but could be extended with port or other metadata)
+  struct endpoint endpoint;
+  // Number of active connections to this backend, used for least-connections load balancing algorithm
+  __u32 num_connections;
+};
+
+enum tcp_state {
+  TCP_STATE_SYN_SEEN = 0,        // SYN seen, handshake not complete
+  TCP_STATE_ESTABLISHED = 1,     // ACK seen → handshake complete
+  TCP_STATE_FIN_FROM_CLIENT = 2, // FIN seen from client
+  TCP_STATE_FIN_FROM_BACKEND = 3,// FIN seen from backend
+  TCP_STATE_FIN_BOTH = 4,        // FIN seen from both sides, waiting for final ACK
+};
+
 struct connection {
   // Index of the backend in the backends map for this connection
   __u32 backend_index;
-
-  // TCP connection state:
-  // 0: syn seen, handshake not complete
-  // 1: ack without syn seen, handshake complete
-  // 2: fin from client seen
-  // 3: fin from backend seen
-  // 4: fin seen from both sides, waiting for final ack
+  // State based on the tcp_state enum
   __u8  state;
 };
 
@@ -198,9 +202,9 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
                                                   int direction) {
   // client to backend direction
   if (direction == 0) {
-    if (conn->state == 0 && tcp->syn == 0) {
+    if (conn->state == TCP_STATE_SYN_SEEN && tcp->syn == 0) {
       struct connection updated = *conn;
-      updated.state = 1;
+      updated.state = TCP_STATE_ESTABLISHED;
       bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
       conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
       if (!conn)
@@ -208,10 +212,10 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
     }
     if (tcp->fin) {
       struct connection updated = *conn;
-      if (conn->state == 3) {
-        updated.state = 4;
+      if (conn->state == TCP_STATE_FIN_FROM_BACKEND) {
+        updated.state = TCP_STATE_FIN_BOTH;
       } else {
-        updated.state = 2;
+        updated.state = TCP_STATE_FIN_FROM_CLIENT;
       }
       bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
       conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
@@ -219,7 +223,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
         return;
       }
     }
-    if ((tcp->ack && conn->state == 4 && tcp->fin == 0) || tcp->rst) {
+    if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!b) {
         return;
@@ -235,10 +239,10 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
   } else {
     if (tcp->fin) {
       struct connection updated = *conn;
-      if (conn->state == 2) {
-        updated.state = 4;
+      if (conn->state == TCP_STATE_FIN_FROM_CLIENT) {
+        updated.state = TCP_STATE_FIN_BOTH;
       } else {
-        updated.state = 3;
+        updated.state = TCP_STATE_FIN_FROM_BACKEND;
       }
       bpf_map_update_elem(&statetrack, &five_tuple, &updated, BPF_ANY);
       conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
@@ -246,7 +250,7 @@ static __always_inline void update_tcp_conn_state(struct five_tuple_t five_tuple
         return;
       }
     }
-    if ((tcp->ack && conn->state == 4 && tcp->fin == 0) || tcp->rst) {
+    if ((tcp->ack && conn->state == TCP_STATE_FIN_BOTH && tcp->fin == 0) || tcp->rst) {
       struct backend *b = bpf_map_lookup_elem(&backends, &conn->backend_index);
       if (!b) {
         return;
@@ -374,7 +378,7 @@ int xdp_load_balancer(struct xdp_md *ctx) {
       // Store the selected backend for this connection in the statetrack map
       struct connection new_conn = {};
       new_conn.backend_index = key;
-      new_conn.state = 0;
+      new_conn.state = TCP_STATE_SYN_SEEN;
       int ret = bpf_map_update_elem(&statetrack, &five_tuple, &new_conn, BPF_ANY);
       if (ret != 0) {
         return XDP_ABORTED;
