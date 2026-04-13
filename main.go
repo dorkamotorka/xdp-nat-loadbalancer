@@ -63,24 +63,31 @@ func main() {
 	if len(backendList) != 2 {
 		log.Fatalf("For simplicity, this demo expects exactly 2 backend IPs, got %d: %v", len(backendList), backendList)
 	}
+
 	for i, backend := range backendList {
 		backend = strings.TrimSpace(backend)
 		backIP, err := parseIPv4(backend)
 		if err != nil {
 			log.Fatalf("Invalid backend IP %q: %v", backend, err)
 		}
-
-		backEp := lbEndpoint{
+		type endpoint struct {
+			Ip uint32
+		}
+		backEp := endpoint{
 			Ip: backIP,
 		}
-
-		// Use index i as the map key to store multiple endpoints
 		if err := objs.lbMaps.Backends.Put(uint32(i), &backEp); err != nil {
 			log.Fatalf("Error adding backend #%d (%s) to eBPF map: %v", i, backend, err)
 		}
-
 		log.Printf("Added backend #%d: %s", i, backend)
 	}
+	// Initialize scheduler state to start at backend index 0
+	var schedulerKey uint32 = 0
+	var schedulerVal uint32 = 0
+	if err := objs.lbMaps.SchedulerState.Put(schedulerKey, schedulerVal); err != nil {
+		log.Fatalf("Initializing scheduler state: %v", err)
+	}
+	log.Println("Scheduler state initialized to backend index 0..")
 
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
