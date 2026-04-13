@@ -10,22 +10,21 @@
 #define IPROTO_TCP 6            // TCP
 #define MAX_TCP_CHECK_WORDS 750 // Max bytes to check in TCP checksum
 
-struct five_tuple_t{
+struct five_tuple_t {
   __u32 src_ip;
   __u32 dst_ip;
   __u16 src_port;
   __u16 dst_port;
-  __u8 protocol;
+  __u8  protocol;
 };
 
 // Backend endpoint information - only IP to simplify, but could be extended with port or other metadata
-struct endpoint{
+struct endpoint {
   __u32 ip;
 };
 
 // Holds the next backend_idx to be used
-struct
-{
+struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, 1);
   __type(key, __u32);
@@ -33,7 +32,7 @@ struct
 } scheduler_state SEC(".maps");
 
 // Map of backends
-struct{
+struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, NUM_BACKENDS);
   __type(key, __u32);
@@ -41,7 +40,7 @@ struct{
 } backends SEC(".maps");
 
 // Map of NAT translations
-struct{
+struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
   __type(key, struct five_tuple_t);
@@ -49,16 +48,15 @@ struct{
 } conntrack SEC(".maps");
 
 // Map for connection tracking
-struct{
+struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
   __type(key, struct five_tuple_t);
   __type(value, __u32);
 } statetrack SEC(".maps");
 
-static __always_inline void log_fib_error(int rc){
-  switch (rc)
-  {
+static __always_inline void log_fib_error(int rc) {
+  switch (rc) {
   case BPF_FIB_LKUP_RET_BLACKHOLE:
     bpf_printk("FIB lookup failed: BLACKHOLE route. Check 'ip route' – the "
                "destination may have a blackhole rule.");
@@ -104,7 +102,7 @@ static __always_inline void log_fib_error(int rc){
   }
 }
 
-static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip){
+static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip) {
   // Clear checksum
   ip->check = 0;
 
@@ -113,7 +111,7 @@ static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip){
 
 // fold 64-bit csum to 16 bits (the “carry add” loop)
 #pragma unroll
-  for (int i = 0; i < 4; i++)  {
+  for (int i = 0; i < 4; i++) {
     if (csum >> 16)
       csum = (csum & 0xffff) + (csum >> 16);
   }
@@ -121,7 +119,7 @@ static __always_inline __u16 recalc_ip_checksum(struct iphdr *ip){
   return ~csum;
 }
 
-static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iphdr *iph, void *data_end){
+static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iphdr *iph, void *data_end) {
   tcph->check = 0;
   __u32 sum = 0;
 
@@ -139,20 +137,20 @@ static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iph
   // but the loop limit should be based on the actual packet size
   __u16 *ptr = (__u16 *)tcph;
 #pragma unroll
-  for (int i = 0; i < MAX_TCP_CHECK_WORDS; i++)  {
-    if ((void *)(ptr + 1) > data_end || (void *)ptr >= (void *)tcph + tcp_len)      break;
+  for (int i = 0; i < MAX_TCP_CHECK_WORDS; i++) {
+    if ((void *)(ptr + 1) > data_end || (void *)ptr >= (void *)tcph + tcp_len) break;
     sum += *ptr;
     ptr++;
   }
 
   // Handle odd-length packets (the last byte)
-  if (tcp_len & 1)  {
+  if (tcp_len & 1) {
     if ((void *)ptr + 1 <= data_end) {
       sum += bpf_htons(*(__u8 *)ptr << 8);
     }
   }
 
-  while (sum >> 16){
+  while (sum >> 16) {
     sum = (sum & 0xFFFF) + (sum >> 16);
   }
 
@@ -162,7 +160,7 @@ static __always_inline __u16 recalc_tcp_checksum(struct tcphdr *tcph, struct iph
 static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
                                               struct bpf_fib_lookup *fib,
                                               __u32 src, __u32 dst,
-                                              __u16 tot_len){
+                                              __u16 tot_len) {
   // Zero and populate only what a full lookup needs
   __builtin_memset(fib, 0, sizeof(*fib));
   // Hardcode address family: AF_INET for IPv4
@@ -183,8 +181,7 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
 }
 
 SEC("xdp")
-int xdp_load_balancer(struct xdp_md *ctx)
-{
+int xdp_load_balancer(struct xdp_md *ctx) {
   void *data_end = (void *)(long)ctx->data_end;
   void *data = (void *)(long)ctx->data;
   struct hdr_cursor nh;
@@ -194,37 +191,32 @@ int xdp_load_balancer(struct xdp_md *ctx)
   struct ethhdr *eth;
   int eth_type = parse_ethhdr(&nh, data_end, &eth);
   // For simplicity we only show IPv4 load-balancing
-  if (eth_type != bpf_htons(ETH_P_IP))
-  {
+  if (eth_type != bpf_htons(ETH_P_IP)) {
     return XDP_PASS;
   }
 
   // Parse IP header to extract source and destination IP
   struct iphdr *ip;
   int ip_type = parse_iphdr(&nh, data_end, &ip);
-  if ((void *)(ip + 1) > data_end)
-  {
+  if ((void *)(ip + 1) > data_end) {
     return XDP_PASS;
   }
 
   // For simplicity only load-balance TCP traffic
-  if (ip->protocol != IPPROTO_TCP)
-  {
+  if (ip->protocol != IPPROTO_TCP) {
     return XDP_PASS;
   }
 
   // Parse TCP header to extract source and destination port
   struct tcphdr *tcp;
   int tcp_type = parse_tcphdr(&nh, data_end, &tcp);
-  if ((void *)(tcp + 1) > data_end)
-  {
+  if ((void *)(tcp + 1) > data_end) {
     return XDP_PASS;
   }
 
   // We could technically load-balance all the traffic but
   // we only focus on port 8000 to not impact any other network traffic in the playground
-  if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000)
-  {
+  if (bpf_ntohs(tcp->source) != 8000 && bpf_ntohs(tcp->dest) != 8000) {
     return XDP_PASS;
   }
   // Store Load Balancer IP for later
@@ -242,8 +234,7 @@ int xdp_load_balancer(struct xdp_md *ctx)
 
   struct bpf_fib_lookup fib = {};
   struct endpoint *out = bpf_map_lookup_elem(&conntrack, &in);
-  if (!out)
-  {
+  if (!out) {
     bpf_printk("Packet from client..");
 
     // Check for an existing connection
@@ -256,42 +247,35 @@ int xdp_load_balancer(struct xdp_md *ctx)
 
     struct endpoint *backend;
     __u32 *backend_idx = bpf_map_lookup_elem(&statetrack, &five_tuple);
-    if (backend_idx)
-    {
+    if (backend_idx) {
       // Existing connection found in statetrack map - update state and proceed with the same backend.
       backend = bpf_map_lookup_elem(&backends, backend_idx);
       if (!backend)
         return XDP_ABORTED;
-    }
-    else
-    {
-      if (tcp->syn == 0)
-        return XDP_ABORTED;
-
-      // new connection - select backend with rr scheduling
+    } else {
+      // new connection - select backend with round-robin scheduling
       __u32 key = 0;
       __u32 zero = 0;
-
       __u32 *curr_idx = bpf_map_lookup_elem(&scheduler_state, &zero);
-      if (!curr_idx)
-      {
+      if (!curr_idx) {
         return XDP_ABORTED;
       }
 
       key = *curr_idx;
-
       backend = bpf_map_lookup_elem(&backends, &key);
-      if (!backend)
-      {
+      if (!backend) {
         return XDP_ABORTED;
       }
 
       __u32 next_idx = (key + 1) % NUM_BACKENDS;                        // Increment the index to point to the next backend
-      bpf_map_update_elem(&scheduler_state, &zero, &next_idx, BPF_ANY); // Update index in scheduler_state map
+      if (bpf_map_update_elem(&scheduler_state, &zero, &next_idx, BPF_ANY) != 0) {
+        return XDP_ABORTED;
+      } // Update index in scheduler_state map
       
       // Store statetrack entry
-      if (bpf_map_update_elem(&statetrack, &five_tuple, &key, BPF_ANY) != 0)
+      if (bpf_map_update_elem(&statetrack, &five_tuple, &key, BPF_ANY) != 0) {
         return XDP_ABORTED;
+      }
 
       // Store conntrack entry for backend→client return path
       struct five_tuple_t in_loadbalancer = {};
@@ -302,15 +286,14 @@ int xdp_load_balancer(struct xdp_md *ctx)
       in_loadbalancer.protocol = IPPROTO_TCP;
       struct endpoint client = {};
       client.ip = ip->saddr;
-      if (bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY) != 0)
+      if (bpf_map_update_elem(&conntrack, &in_loadbalancer, &client, BPF_ANY) != 0) {
         return XDP_ABORTED;
+      }
     }
 
     // Perform a FIB lookup
-    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip,
-                                bpf_ntohs(ip->tot_len));
-    if (rc != BPF_FIB_LKUP_RET_SUCCESS)
-    {
+    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, backend->ip, bpf_ntohs(ip->tot_len));
+    if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
       log_fib_error(rc);
       return XDP_ABORTED;
     }
@@ -318,16 +301,12 @@ int xdp_load_balancer(struct xdp_md *ctx)
     ip->daddr = backend->ip;
     // Replace destination MAC with backends' MAC
     __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
-  }
-  else
-  {
+  } else {
     bpf_printk("Packet from backend..");
 
     // Perform a FIB lookup - same as above
-    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, out->ip,
-                                bpf_ntohs(ip->tot_len));
-    if (rc != BPF_FIB_LKUP_RET_SUCCESS)
-    {
+    int rc = fib_lookup_v4_full(ctx, &fib, ip->daddr, out->ip, bpf_ntohs(ip->tot_len));
+    if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
       log_fib_error(rc);
       return XDP_ABORTED;
     }

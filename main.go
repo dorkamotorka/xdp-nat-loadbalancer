@@ -87,7 +87,7 @@ func main() {
 	if err := objs.lbMaps.SchedulerState.Put(schedulerKey, schedulerVal); err != nil {
 		log.Fatalf("Initializing scheduler state: %v", err)
 	}
-	log.Println("Scheduler state initialized to backend index 0")
+	log.Println("Scheduler state initialized to backend index 0..")
 
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
