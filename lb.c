@@ -30,24 +30,8 @@ struct backend {
   __u32 used_count; 
 };
 
-enum tcp_state {
-  TCP_STATE_SYN_SEEN = 0,        // SYN seen, handshake not complete
-  TCP_STATE_ESTABLISHED = 1,     // ACK seen → handshake complete
-  TCP_STATE_FIN_FROM_CLIENT = 2, // FIN seen from client
-  TCP_STATE_FIN_FROM_BACKEND = 3,// FIN seen from backend
-  TCP_STATE_FIN_BOTH = 4,        // FIN seen from both sides, waiting for final ACK
-};
-
-struct connection {
-  // Index of the backend in the backends map for this connection
-  __u32 backend_index;
-  // State based on the tcp_state enum
-  __u8  state;
-};
-
 // Holds the next backend_idx to be used
-struct
-{
+struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, 1);
   __type(key, __u32);
@@ -64,6 +48,8 @@ struct {
   __type(value, struct backend);
 } backends SEC(".maps");
 
+
+// Used for backend traffic to lookup client IP
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
@@ -71,11 +57,12 @@ struct {
   __type(value, struct endpoint);
 } conntrack SEC(".maps");
 
+// Used by client traffic to lookup backend index
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 1000);
   __type(key, struct five_tuple_t);
-  __type(value, struct connection);
+  __type(value, __u32);
 } statetrack SEC(".maps");
 
 static __always_inline void log_fib_error(int rc) {
@@ -205,6 +192,7 @@ static __always_inline int fib_lookup_v4_full(struct xdp_md *ctx,
 
   return bpf_fib_lookup(ctx, fib, sizeof(*fib), 0);
 }
+
 SEC("xdp")
 int xdp_load_balancer(struct xdp_md *ctx) {
   void *data_end = (void *)(long)ctx->data_end;
@@ -245,16 +233,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     return XDP_PASS;
   }
 
-  /*
-  bpf_printk("IN: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-  bpf_printk("IN: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
-             "%02x:%02x:%02x:%02x:%02x:%02x",
-             eth->h_source[0], eth->h_source[1], eth->h_source[2],
-             eth->h_source[3], eth->h_source[4], eth->h_source[5],
-             eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
-             eth->h_dest[4], eth->h_dest[5]);
-  */
-
   // Store Load Balancer IP for later
   __u32 lb_ip = ip->daddr;
 
@@ -282,60 +260,44 @@ int xdp_load_balancer(struct xdp_md *ctx) {
     five_tuple.protocol = IPPROTO_TCP;
 
     struct backend *backend;
-    struct connection *conn = bpf_map_lookup_elem(&statetrack, &five_tuple);
-    if (conn) {
+    __u32 *backend_idx = bpf_map_lookup_elem(&statetrack, &five_tuple);
+    if (backend_idx) {
       //bpf_printk("Existing connection found in statetrack map - update state and proceed with the same backend..");
-      backend = bpf_map_lookup_elem(&backends, &conn->backend_index);
+      backend = bpf_map_lookup_elem(&backends, backend_idx);
       if (!backend) {
         return XDP_ABORTED;
       }
     } else {
-      // sanity check since a new connection must start with a SYN packet
-      if (tcp->syn == 0) {
-        return XDP_ABORTED;
-      }
-      //bpf_printk("No existing connection found in statetrack map, new connection so select a backend..");
-
       // Select a backend using weighted round robin algorithm
-
-      __u32 key = 0;
+      __u32 selected = 0;
       __u32 zero = 0;
       __u32 *curr_idx = bpf_map_lookup_elem(&scheduler_state, &zero);
-      if (!curr_idx)
-      {
+      if (!curr_idx) {
         return XDP_ABORTED;
       }
-
-      key = *curr_idx;
-
-      backend = bpf_map_lookup_elem(&backends, &key);
-      if (!backend)
-      {
-        //    bpf_printk("ABORT_3 selected_backend_lookup_failed");
+      selected = *curr_idx;
+      backend = bpf_map_lookup_elem(&backends, &selected);
+      if (!backend) {
         return XDP_ABORTED;
       }
 
       backend->used_count += 1; // Increment used_count as we are adding a new connection to this backend
 
       // Only after using this backend in accordance to its weight will the following if-statement be fulfilled
-      if (backend->used_count >= backend->weight) // Check whether used_count is equal to the backend's weight
-      {
-        backend->used_count = 0;                                                // Set used_count to 0 when it completes its weight
-        __u32 next_idx = (key + 1) % NUM_BACKENDS;                       // Increment the index to point to the next backend
+      if (backend->used_count >= backend->weight) {                           // Check whether used_count is equal to the backend's weight
+        backend->used_count = 0;                                              // Set used_count to 0 when it completes its weight
+        __u32 next_idx = (selected + 1) % NUM_BACKENDS;                       // Increment the index to point to the next backend
         bpf_map_update_elem(&scheduler_state, &zero, &next_idx, BPF_ANY); // Update index in scheduler_state map
       }
 
-      backend = bpf_map_lookup_elem(&backends, &key);
+      backend = bpf_map_lookup_elem(&backends, &selected);
       if (!backend) {
         return XDP_ABORTED;
       }
       bpf_printk("Selected backend with IP %pI4", &backend->endpoint.ip);
 
       // Store the selected backend for this connection in the statetrack map
-      struct connection new_conn = {};
-      new_conn.backend_index = key;
-      new_conn.state = TCP_STATE_SYN_SEEN;
-      int ret = bpf_map_update_elem(&statetrack, &five_tuple, &new_conn, BPF_ANY);
+      int ret = bpf_map_update_elem(&statetrack, &five_tuple, &selected, BPF_ANY);
       if (ret != 0) {
         return XDP_ABORTED;
       }
@@ -397,16 +359,6 @@ int xdp_load_balancer(struct xdp_md *ctx) {
   // Ethernet MACs because the Ethernet frame checksum (FCS) isn’t in the header
   // but instead is automatically recomputed by the NIC hardware when the packet
   // is transmitted.
-
-  /*
-  bpf_printk("OUT: SRC IP %pI4 -> DST IP %pI4", &ip->saddr, &ip->daddr);
-  bpf_printk("OUT: SRC MAC %02x:%02x:%02x:%02x:%02x:%02x -> DST MAC "
-             "%02x:%02x:%02x:%02x:%02x:%02x",
-             eth->h_source[0], eth->h_source[1], eth->h_source[2],
-             eth->h_source[3], eth->h_source[4], eth->h_source[5],
-             eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3],
-             eth->h_dest[4], eth->h_dest[5]);
-  */
 
   // Return XDP_TX to transmit the modified packet back to the network
   return XDP_TX;
