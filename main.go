@@ -63,22 +63,26 @@ func main() {
 	if len(backendList) != 2 {
 		log.Fatalf("For simplicity, this demo expects exactly 2 backend IPs, got %d: %v", len(backendList), backendList)
 	}
+
 	for i, backend := range backendList {
 		backend = strings.TrimSpace(backend)
 		backIP, err := parseIPv4(backend)
 		if err != nil {
 			log.Fatalf("Invalid backend IP %q: %v", backend, err)
 		}
-
-		backEp := lbEndpoint{
-			Ip: backIP,
+		type lbBackend struct {
+			Ip        uint32
+			Weight    uint32
+			UsedCount uint32
 		}
-
-		// Use index i as the map key to store multiple endpoints
+		backEp := lbBackend{
+			Ip:        backIP,
+			Weight:    uint32(i + 1), // Dummy but different weight for each backend - add 1 to avoid zero weight
+			UsedCount: 0,
+		}
 		if err := objs.lbMaps.Backends.Put(uint32(i), &backEp); err != nil {
 			log.Fatalf("Error adding backend #%d (%s) to eBPF map: %v", i, backend, err)
 		}
-
 		log.Printf("Added backend #%d: %s", i, backend)
 	}
 
